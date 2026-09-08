@@ -5,5 +5,5 @@ model files and `.chunk` terrain files in *The Legend of Zelda: Tears of the Kin
 
 ## Credit
 
-[MeshCodec](https://github.com/dt-12345/MeshCodec) - Original C++ Impl
+[MeshCodec](https://github.com/dt-12345/MeshCodec) - Original C++ Impl\
 [ZstdSharp.Port](https://github.com/oleg-st/ZstdSharp) - ZSTD Library
