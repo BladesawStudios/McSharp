@@ -39,19 +39,27 @@ bool ok = MeshCodec.DecompressMc(dst, mc, work);
 
 ### Encode
 
+If you decoded a package, edited the BFRES body, and want to write it back, use `Repack`:
+
+```csharp
+byte[] mc = McEncoder.Repack(originalPackage, editedBody);
+```
+
+The two lower-level entry points are there when you are building a package from scratch:
+
 ```csharp
 // A BFRES with no mesh section.
 byte[] mc = McEncoder.CompressMc(bfres);
 
-// A BFRES whose mesh section must be preserved: pass the original FMSH bytes through.
+// A BFRES whose mesh section must be preserved.
 MeshCodec.TryReadPackageHeader(original, out var header);
 int fmsh = McEncoder.FindFmshOffset(original);
 byte[] mc = McEncoder.CompressMcWithFmsh(bfres, original.AsSpan(fmsh), header.GetDecompressedSize());
 ```
 
 `CompressMc` throws if handed a BFRES that declares a mesh section, since writing it as a plain
-package would silently drop the geometry - use `CompressMcWithFmsh` for those. Check with
-`McEncoder.DeclaresMeshSection` or `MeshCodec.HasFmshSection`.
+package would silently drop the geometry. Check with `McEncoder.DeclaresMeshSection` or
+`MeshCodec.HasFmshSection`, or just call `Repack`.
 
 Encoder settings live on `EncoderOptions`:
 

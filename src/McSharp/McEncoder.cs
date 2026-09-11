@@ -109,6 +109,49 @@ public static unsafe class McEncoder
         return result;
     }
 
+    public static byte[] Repack(ReadOnlySpan<byte> originalPackage, ReadOnlySpan<byte> newBody,
+                                EncoderOptions? options = null)
+    {
+        int fmsh = FindFmshOffset(originalPackage);
+
+        if (fmsh < 0)
+        {
+            if (DeclaresMeshSection(newBody))
+                throw new ArgumentException(
+                    "This BFRES declares an FMSH mesh section, but the original package does not contain one to " +
+                    "copy through. Its vertex and index buffers cannot be reconstructed.",
+                    nameof(originalPackage));
+
+            return CompressMc(newBody, options);
+        }
+
+        return CompressMcWithFmsh(newBody, originalPackage.Slice(fmsh),
+                                  GetTotalDecompressedSize(newBody, originalPackage.Slice(fmsh)), options);
+    }
+
+    public static uint GetTotalDecompressedSize(ReadOnlySpan<byte> bfres, ReadOnlySpan<byte> fmshSection)
+    {
+        if (bfres.Length < 0x20)
+            throw new ArgumentException("Input is too small to be a BFRES file.", nameof(bfres));
+
+        if (fmshSection.Length < Marshal.SizeOf<ResMeshCodecHeader>())
+            throw new ArgumentException("Input is too small to be an FMSH mesh section.", nameof(fmshSection));
+
+        ResMeshCodecHeader header = MemoryMarshal.Read<ResMeshCodecHeader>(fmshSection);
+
+        if (header.MagicValue != ResMeshCodecHeader.Magic)
+            throw new ArgumentException("Input is not an FMSH mesh section.", nameof(fmshSection));
+
+        uint fileSize = MemoryMarshal.Read<uint>(bfres.Slice(0x1c, 4));
+        uint align = Math.Max(header.VertexAlign, header.IndexAlign);
+        uint outputBuf = AlignUp(AlignUp(fileSize, 8) + 0x120, align);
+        uint vertexBuf = AlignUp(outputBuf + header.IndexOutputSize, header.VertexAlign);
+
+        return vertexBuf + header.VertexOutputSize;
+    }
+
+    private static uint AlignUp(uint value, uint align) => (value + align - 1) & ~(align - 1);
+
     public static int FindFmshOffset(ReadOnlySpan<byte> package)
     {
         int limit = package.Length - Marshal.SizeOf<ResMeshCodecHeader>();
