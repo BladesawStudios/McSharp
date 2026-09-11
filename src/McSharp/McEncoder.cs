@@ -8,6 +8,8 @@ namespace McSharp;
 public sealed class EncoderOptions
 {
     public int ZstdLevel { get; set; } = 8;
+
+    public Func<ReadOnlyMemory<byte>, int, byte[]>? CompressPayload { get; set; }
 }
 
 public static unsafe class McEncoder
@@ -17,6 +19,12 @@ public static unsafe class McEncoder
     public const int PlainPackageAlignmentShift = 3;
 
     public const uint MeshSectionFlag = 0x10;
+
+    private const ZSTD_cParameter ZstdFormat = ZSTD_cParameter.ZSTD_c_experimentalParam2;
+
+    private const ZSTD_cParameter ZstdUseRowMatchFinder = ZSTD_cParameter.ZSTD_c_experimentalParam14;
+
+    private const int ZstdParamDisable = 2;
 
     public static uint CalculatePackageFlags(uint decompressedSize, int alignmentShift)
     {
@@ -52,7 +60,9 @@ public static unsafe class McEncoder
             Flags = CalculatePackageFlags((uint)src.Length, PlainPackageAlignmentShift),
         };
 
-        byte[] payload = CompressPayload(src, options.ZstdLevel);
+        byte[] payload = options.CompressPayload is { } custom
+            ? custom(src.ToArray(), options.ZstdLevel)
+            : CompressPayload(src, options.ZstdLevel);
 
         byte[] result = new byte[0xc + payload.Length];
         MemoryMarshal.Write(result, in pkgHeader);
@@ -117,9 +127,10 @@ public static unsafe class McEncoder
 
         try
         {
-            ZSTD_CCtx_setParameter(cctx, ZSTD_cParameter.ZSTD_c_experimentalParam2, (int)ZSTD_format_e.ZSTD_f_zstd1_magicless);
+            ZSTD_CCtx_setParameter(cctx, ZstdFormat, (int)ZSTD_format_e.ZSTD_f_zstd1_magicless);
             ZSTD_CCtx_setParameter(cctx, ZSTD_cParameter.ZSTD_c_compressionLevel, level);
             ZSTD_CCtx_setParameter(cctx, ZSTD_cParameter.ZSTD_c_contentSizeFlag, 0);
+            ZSTD_CCtx_setParameter(cctx, ZstdUseRowMatchFinder, ZstdParamDisable);
             ZSTD_CCtx_setPledgedSrcSize(cctx, ulong.MaxValue);
 
             fixed (byte* pSrc = src)
