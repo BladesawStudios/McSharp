@@ -24,7 +24,11 @@ public static unsafe class McEncoder
 
     private const ZSTD_cParameter ZstdUseRowMatchFinder = ZSTD_cParameter.ZSTD_c_experimentalParam14;
 
+    private const ZSTD_cParameter ZstdBlockSplitterLevel = ZSTD_cParameter.ZSTD_c_experimentalParam20;
+
     private const int ZstdParamDisable = 2;
+
+    private const int ZstdBlockSplitterOff = 1;
 
     public static uint CalculatePackageFlags(uint decompressedSize, int alignmentShift)
     {
@@ -131,6 +135,7 @@ public static unsafe class McEncoder
             ZSTD_CCtx_setParameter(cctx, ZSTD_cParameter.ZSTD_c_compressionLevel, level);
             ZSTD_CCtx_setParameter(cctx, ZSTD_cParameter.ZSTD_c_contentSizeFlag, 0);
             ZSTD_CCtx_setParameter(cctx, ZstdUseRowMatchFinder, ZstdParamDisable);
+            ZSTD_CCtx_setParameter(cctx, ZstdBlockSplitterLevel, ZstdBlockSplitterOff);
             ZSTD_CCtx_setPledgedSrcSize(cctx, ulong.MaxValue);
 
             fixed (byte* pSrc = src)
