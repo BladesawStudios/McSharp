@@ -128,7 +128,18 @@ internal static class Program
     private static bool Compress(string input, string output)
     {
         byte[] data = File.ReadAllBytes(input);
-        byte[] package = McEncoder.CompressMc(data, new EncoderOptions { ZstdLevel = 19 });
+
+        byte[] package;
+        try
+        {
+            package = McEncoder.CompressMc(data);
+        }
+        catch (ArgumentException ex)
+        {
+            Console.WriteLine($"[FAIL] {Path.GetFileName(input)}: {ex.Message}");
+            return false;
+        }
+
         Directory.CreateDirectory(Path.GetDirectoryName(Path.GetFullPath(output))!);
         File.WriteAllBytes(output, package);
         Console.WriteLine($"[OK] {Path.GetFileName(input)} ({data.Length} B -> {package.Length} B) -> {output}");

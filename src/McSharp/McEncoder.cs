@@ -7,39 +7,49 @@ namespace McSharp;
 
 public sealed class EncoderOptions
 {
-    public int ZstdLevel { get; set; } = 3;
+    public int ZstdLevel { get; set; } = 8;
 }
 
 public static unsafe class McEncoder
 {
-    public static uint CalculatePackageFlags(uint decompressedSize)
+    public const int MeshPackageAlignmentShift = 12;
+
+    public const int PlainPackageAlignmentShift = 3;
+
+    public const uint MeshSectionFlag = 0x10;
+
+    public static uint CalculatePackageFlags(uint decompressedSize, int alignmentShift)
     {
-        uint shift = 0;
-        uint value = decompressedSize;
+        if ((uint)alignmentShift > 0xf)
+            throw new ArgumentOutOfRangeException(nameof(alignmentShift));
 
-        while ((value & 1) == 0 && value > 0x07FFFFFF)
-        {
-            value >>= 1;
-            shift++;
-        }
+        uint align = 1u << alignmentShift;
+        uint aligned = (decompressedSize + align - 1) & ~(align - 1);
+        uint mantissa = aligned >> alignmentShift;
 
-        return (value << 5) | (shift & 0xf);
+        if (mantissa > 0x07FFFFFF)
+            throw new ArgumentOutOfRangeException(nameof(decompressedSize),
+                $"{decompressedSize} bytes does not fit a package header with an alignment shift of {alignmentShift}.");
+
+        return (mantissa << 5) | (uint)alignmentShift;
     }
 
-    public static byte[] CompressMc(ReadOnlySpan<byte> src, EncoderOptions? options = null)
-    {
-        if (src.Length < 0xc)
-            throw new ArgumentException("Input is too small to be a BFRES file.", nameof(src));
+    public static bool DeclaresMeshSection(ReadOnlySpan<byte> bfres) =>
+        bfres.Length > 0xee
+        && bfres[0] == (byte)'F' && bfres[1] == (byte)'R' && bfres[2] == (byte)'E' && bfres[3] == (byte)'S'
+        && ((bfres[0xee] >> 3) & 1) != 0;
 
+    private static byte[] CompressPackage(ReadOnlySpan<byte> src, EncoderOptions? options)
+    {
         options ??= new EncoderOptions();
 
         ResMeshCodecPackageHeader pkgHeader = new ResMeshCodecPackageHeader
         {
             MagicValue = ResMeshCodecPackageHeader.Magic,
-            VersionMicro = 0,
+            VersionMicro = 1,
             VersionMinor = 1,
             VersionMajor = 0,
-            Flags = CalculatePackageFlags((uint)src.Length),
+            Flags = CalculatePackageFlags((uint)src.Length, PlainPackageAlignmentShift),
         };
 
         byte[] payload = CompressPayload(src, options.ZstdLevel);
@@ -51,13 +61,28 @@ public static unsafe class McEncoder
         return result;
     }
 
+    public static byte[] CompressMc(ReadOnlySpan<byte> src, EncoderOptions? options = null)
+    {
+        if (src.Length < 0xc)
+            throw new ArgumentException("Input is too small to be a BFRES file.", nameof(src));
+
+        if (DeclaresMeshSection(src))
+            throw new ArgumentException(
+                "This BFRES declares an FMSH mesh section, whose vertex and index buffers live outside the " +
+                "zstd payload. Packing it with CompressMc would drop them and produce a file the game cannot " +
+                "load. Use CompressMcWithFmsh and pass the original package's mesh section through.",
+                nameof(src));
+
+        return CompressPackage(src, options);
+    }
+
     public static byte[] CompressMcWithFmsh(ReadOnlySpan<byte> src, ReadOnlySpan<byte> fmshSection,
                                             uint totalDecompressedSize, EncoderOptions? options = null)
     {
-        byte[] package = CompressMc(src, options);
+        byte[] package = CompressPackage(src, options);
 
         ResMeshCodecPackageHeader header = MemoryMarshal.Read<ResMeshCodecPackageHeader>(package);
-        header.Flags = CalculatePackageFlags(totalDecompressedSize);
+        header.Flags = CalculatePackageFlags(totalDecompressedSize, MeshPackageAlignmentShift) | MeshSectionFlag;
         MemoryMarshal.Write(package, in header);
 
         if (fmshSection.IsEmpty)
