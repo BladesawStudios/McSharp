@@ -10,6 +10,7 @@
     <AssemblyName>mcsharp-cli</AssemblyName>
     <RootNamespace>McSharp.Cli</RootNamespace>
     <InvariantGlobalization>true</InvariantGlobalization>
+    <IsPackable>false</IsPackable>
   </PropertyGroup>
 
   <ItemGroup>

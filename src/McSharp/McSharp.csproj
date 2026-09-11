@@ -8,16 +8,40 @@
     <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
     <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
     <NoWarn>$(NoWarn);CS1591</NoWarn>
+    <AssemblyName>McSharp</AssemblyName>
+    <RootNamespace>McSharp</RootNamespace>
+    <GenerateDocumentationFile>true</GenerateDocumentationFile>
   </PropertyGroup>
 
   <PropertyGroup>
-    <PackageId>McSharp</PackageId>
-    <Version>0.1.0</Version>
+    <PackageId>MeshCodecSharp</PackageId>
+    <Version>1.0.0</Version>
     <Authors>Bladesaw Studios</Authors>
-    <Description>A decoder and encoder for Nintendo's MeshCodec compression format, as used by .bfres.mc and .chunk files in Tears of the Kingdom.</Description>
+    <Copyright>Copyright (c) 2026 Bladesaw Studios</Copyright>
+    <Description>A decoder and encoder for Nintendo's MeshCodec compression format, as used by .bfres.mc and .chunk files in Tears of the Kingdom. Re-encodes retail files byte-identically to vanilla.</Description>
+    <PackageTags>meshcodec;bfres;totk;tearsofthekingdom;nintendo;zstd;mesh;modding</PackageTags>
     <PackageLicenseExpression>MIT</PackageLicenseExpression>
+    <PackageReadmeFile>README.md</PackageReadmeFile>
+    <PackageProjectUrl>https://github.com/BladesawStudios/McSharp</PackageProjectUrl>
+    <RepositoryUrl>https://github.com/BladesawStudios/McSharp</RepositoryUrl>
     <RepositoryType>git</RepositoryType>
   </PropertyGroup>
+
+  <PropertyGroup>
+    <IncludeSymbols>true</IncludeSymbols>
+    <SymbolPackageFormat>snupkg</SymbolPackageFormat>
+    <PublishRepositoryUrl>true</PublishRepositoryUrl>
+    <EmbedUntrackedSources>true</EmbedUntrackedSources>
+    <Deterministic>true</Deterministic>
+  </PropertyGroup>
+
+  <PropertyGroup Condition="'$(GITHUB_ACTIONS)' == 'true'">
+    <ContinuousIntegrationBuild>true</ContinuousIntegrationBuild>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <None Include="..\..\README.md" Pack="true" PackagePath="\" />
+  </ItemGroup>
 
   <ItemGroup>
     <PackageReference Include="BladesawStudios.ZstdSharp" Version="0.8.8.1" />
