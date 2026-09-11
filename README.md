@@ -23,8 +23,8 @@ byte[] mc = File.ReadAllBytes("Animal_Bass.Bass.bfres.mc");
 byte[]? bfres = MeshCodec.DecompressMc(mc);
 ```
 
-`DecompressMc(ReadOnlySpan<byte>)` allocates its own output and scratch buffers. In a loop, reuse
-them instead:
+`DecompressMc(ReadOnlySpan<byte>)` allocates its own output and scratch buffers, sizing the scratch
+buffer from the file itself. In a loop, reuse one buffer across calls instead:
 
 ```csharp
 byte[] work = new byte[MeshCodec.DefaultWorkBufferSize];

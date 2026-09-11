@@ -15,7 +15,7 @@
 
   <PropertyGroup>
     <PackageId>MeshCodecSharp</PackageId>
-    <Version>1.1.0</Version>
+    <Version>1.1.1</Version>
     <Authors>Bladesaw Studios</Authors>
     <Copyright>Copyright (c) 2026 Bladesaw Studios</Copyright>
     <Description>A decoder and encoder for Nintendo's MeshCodec compression format, as used by .bfres.mc and .chunk files in Tears of the Kingdom. Re-encodes retail files byte-identically to vanilla.</Description>

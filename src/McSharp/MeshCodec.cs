@@ -48,13 +48,27 @@ public static unsafe class MeshCodec
         return true;
     }
 
+    public static uint GetRequiredWorkBufferSize(ReadOnlySpan<byte> package)
+    {
+        int size = Marshal.SizeOf<ResMeshCodecHeader>();
+        int limit = package.Length - size;
+
+        for (int i = 0xc; i <= limit; ++i)
+        {
+            if (MemoryMarshal.Read<uint>(package.Slice(i, 4)) == ResMeshCodecHeader.Magic)
+                return MemoryMarshal.Read<ResMeshCodecHeader>(package.Slice(i, size)).WorkMemSize;
+        }
+
+        return 0;
+    }
+
     public static byte[]? DecompressMc(ReadOnlySpan<byte> src)
     {
         if (!TryReadPackageHeader(src, out ResMeshCodecPackageHeader header))
             return null;
 
         byte[] dst = new byte[header.GetDecompressedSize()];
-        byte[] work = new byte[DefaultWorkBufferSize];
+        byte[] work = new byte[GetRequiredWorkBufferSize(src)];
         return DecompressMc(dst, src, work) ? dst : null;
     }
 
@@ -209,7 +223,7 @@ public static unsafe class MeshCodec
             return null;
 
         byte[] dst = new byte[header.DecompressedSize];
-        byte[] work = new byte[DefaultWorkBufferSize];
+        byte[] work = new byte[header.WorkMemSize];
         return DecompressChunk(dst, src, work) ? dst : null;
     }
 

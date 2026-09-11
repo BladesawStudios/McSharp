@@ -112,18 +112,16 @@ public static unsafe class McEncoder
     public static byte[] Repack(ReadOnlySpan<byte> originalPackage, ReadOnlySpan<byte> newBody,
                                 EncoderOptions? options = null)
     {
+        if (!DeclaresMeshSection(newBody))
+            return CompressMc(newBody, options);
+
         int fmsh = FindFmshOffset(originalPackage);
 
         if (fmsh < 0)
-        {
-            if (DeclaresMeshSection(newBody))
-                throw new ArgumentException(
-                    "This BFRES declares an FMSH mesh section, but the original package does not contain one to " +
-                    "copy through. Its vertex and index buffers cannot be reconstructed.",
-                    nameof(originalPackage));
-
-            return CompressMc(newBody, options);
-        }
+            throw new ArgumentException(
+                "This BFRES declares an FMSH mesh section, but the original package does not contain one to " +
+                "copy through. Its vertex and index buffers cannot be reconstructed.",
+                nameof(originalPackage));
 
         return CompressMcWithFmsh(newBody, originalPackage.Slice(fmsh),
                                   GetTotalDecompressedSize(newBody, originalPackage.Slice(fmsh)), options);
