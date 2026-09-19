@@ -27,12 +27,19 @@ byte[]? bfres = MeshCodec.DecompressMc(mc);
 buffer from the file itself. In a loop, reuse one buffer across calls instead:
 
 ```csharp
-byte[] work = new byte[MeshCodec.DefaultWorkBufferSize];
+byte[] work = new byte[MeshCodec.GetRequiredWorkBufferSize(mc)];
 
 MeshCodec.TryReadPackageHeader(mc, out var header);
 byte[] dst = new byte[header.GetDecompressedSize()];
 bool ok = MeshCodec.DecompressMc(dst, mc, work);
 ```
+
+`GetRequiredWorkBufferSize` reads the figure out of the file, so size the buffer from the largest
+file you will process rather than reallocating per file. `DefaultWorkBufferSize` (256 MB) is the
+ceiling no retail file exceeds, not a figure you need to allocate up front.
+
+Decoding is thread-safe apart from `FlushDenormalHalves`, which is per-thread: set it on whichever
+thread does the decoding.
 
 `DecompressChunk` and `DecompressQuad` handle `.chunk` terrain and quad-tree payloads, and
 `DecompressFmsh` decodes a bare mesh section.
@@ -76,6 +83,16 @@ matching vanilla. `CompressPayload` lets you substitute your own zstd implementa
 McSharp decodes the FMSH vertex/index streams but does not re-encode them; `CompressMcWithFmsh`
 copies the existing mesh section through verbatim. That is enough to round-trip retail files and to
 edit anything in the BFRES body, but not to author new geometry.
+
+## Malformed input
+
+The decode entry points treat everything inside a file as untrusted. Sizes, offsets and alignments
+are bounds-checked before use, and a malformed, truncated or hostile file makes them return
+`false`/`null` rather than throw, crash or read outside the buffers you passed in.
+
+The `byte[]`-returning overloads allocate from sizes declared in the file, so they additionally
+refuse anything over `MeshCodec.MaxDecompressedSize` (1 GB) or `DefaultWorkBufferSize`. The
+`Span<byte>` overloads do not allocate and leave that budget to you.
 
 ## Notes
 

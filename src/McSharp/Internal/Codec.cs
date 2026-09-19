@@ -25,7 +25,7 @@ internal sealed unsafe class NullCodec : ICodec
     {
         if (_remainingIndexSize != 0)
         {
-            uint size = Math.Max(_remainingIndexSize, 0x40000u);
+            uint size = Math.Min(_remainingIndexSize, 0x40000u);
             _remainingIndexSize -= size;
 
             Buffer.MemoryCopy(ctx.CurrentPos, _indexOutputBuffer, size, size);
@@ -33,9 +33,9 @@ internal sealed unsafe class NullCodec : ICodec
             ctx.CurrentPos += size;
             _indexOutputBuffer += size;
         }
-        else
+        else if (_remainingVertexSize != 0)
         {
-            uint size = Math.Max(_remainingVertexSize, 0x40000u);
+            uint size = Math.Min(_remainingVertexSize, 0x40000u);
             _remainingVertexSize -= size;
 
             Buffer.MemoryCopy(ctx.CurrentPos, _vertexOutputBuffer, size, size);
@@ -90,7 +90,7 @@ internal sealed unsafe class ZStdCodec : ICodec
             void* outputBuffer;
             if (_remainingIndexSize != 0)
             {
-                uint size = Math.Max(_remainingIndexSize, 0x20000u);
+                uint size = Math.Min(_remainingIndexSize, 0x20000u);
                 _remainingIndexSize -= size;
                 outputBuffer = _indexOutputBuffer;
                 _indexOutputBuffer += size;
@@ -98,7 +98,7 @@ internal sealed unsafe class ZStdCodec : ICodec
             }
             else if (_remainingVertexSize != 0)
             {
-                uint size = Math.Max(_remainingVertexSize, 0x20000u);
+                uint size = Math.Min(_remainingVertexSize, 0x20000u);
                 _remainingVertexSize -= size;
                 outputBuffer = _vertexOutputBuffer;
                 _vertexOutputBuffer += size;

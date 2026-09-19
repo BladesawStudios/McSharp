@@ -10,11 +10,6 @@ internal static class McResult
     public const uint Error20 = 0x80000020;
 }
 
-public sealed class MeshCodecException : Exception
-{
-    public MeshCodecException(string message) : base(message) { }
-}
-
 internal unsafe struct StreamContext
 {
     public byte* Stream;

@@ -16,6 +16,7 @@ internal static unsafe class FloatMath
         return (float)BitConverter.UInt16BitsToHalf(raw);
     }
 
+    [ThreadStatic]
     internal static bool FlushDenormalHalves;
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]

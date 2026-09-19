@@ -35,21 +35,21 @@ public static unsafe class McEncoder
         if ((uint)alignmentShift > 0xf)
             throw new ArgumentOutOfRangeException(nameof(alignmentShift));
 
-        uint align = 1u << alignmentShift;
-        uint aligned = (decompressedSize + align - 1) & ~(align - 1);
-        uint mantissa = aligned >> alignmentShift;
+        ulong align = 1ul << alignmentShift;
+        ulong aligned = (decompressedSize + align - 1) & ~(align - 1);
+        ulong mantissa = aligned >> alignmentShift;
 
-        if (mantissa > 0x07FFFFFF)
+        // Rounding up can carry past uint.MaxValue, and GetDecompressedSize reads the size back as
+        // a uint, so a mantissa that fits the field is not on its own enough.
+        if (aligned > uint.MaxValue || mantissa > 0x07FFFFFF)
             throw new ArgumentOutOfRangeException(nameof(decompressedSize),
                 $"{decompressedSize} bytes does not fit a package header with an alignment shift of {alignmentShift}.");
 
-        return (mantissa << 5) | (uint)alignmentShift;
+        return ((uint)mantissa << 5) | (uint)alignmentShift;
     }
 
     public static bool DeclaresMeshSection(ReadOnlySpan<byte> bfres) =>
-        bfres.Length > 0xee
-        && bfres[0] == (byte)'F' && bfres[1] == (byte)'R' && bfres[2] == (byte)'E' && bfres[3] == (byte)'S'
-        && ((bfres[0xee] >> 3) & 1) != 0;
+        bfres.Length > 0xee && IsBfres(bfres) && ((bfres[0xee] >> 3) & 1) != 0;
 
     private static byte[] CompressPackage(ReadOnlySpan<byte> src, EncoderOptions? options)
     {
@@ -112,6 +112,12 @@ public static unsafe class McEncoder
     public static byte[] Repack(ReadOnlySpan<byte> originalPackage, ReadOnlySpan<byte> newBody,
                                 EncoderOptions? options = null)
     {
+        if (!IsBfres(newBody))
+            throw new ArgumentException(
+                "The replacement body is not a BFRES file. Repack decides whether to carry the mesh " +
+                "section across by reading the BFRES header, so it cannot pack an arbitrary buffer.",
+                nameof(newBody));
+
         if (!DeclaresMeshSection(newBody))
             return CompressMc(newBody, options);
 
@@ -140,6 +146,12 @@ public static unsafe class McEncoder
         if (header.MagicValue != ResMeshCodecHeader.Magic)
             throw new ArgumentException("Input is not an FMSH mesh section.", nameof(fmshSection));
 
+        if (!MeshCodec.IsUsableAlignment(header.IndexAlign) || !MeshCodec.IsUsableAlignment(header.VertexAlign))
+            throw new ArgumentException(
+                $"The FMSH mesh section declares unusable stream alignments (index {header.IndexAlign}, " +
+                $"vertex {header.VertexAlign}); both must be a power of two.",
+                nameof(fmshSection));
+
         uint fileSize = MemoryMarshal.Read<uint>(bfres.Slice(0x1c, 4));
         uint align = Math.Max(header.VertexAlign, header.IndexAlign);
         uint outputBuf = AlignUp(AlignUp(fileSize, 8) + 0x120, align);
@@ -150,16 +162,60 @@ public static unsafe class McEncoder
 
     private static uint AlignUp(uint value, uint align) => (value + align - 1) & ~(align - 1);
 
+    /// <summary>
+    /// Locates the FMSH mesh section trailing a package, or -1 if there is none. The section is
+    /// found by scanning for its magic, which can occur by chance inside the compressed payload, so
+    /// candidates are checked against <see cref="IsPlausibleFmshHeader"/> before being accepted.
+    /// </summary>
     public static int FindFmshOffset(ReadOnlySpan<byte> package)
     {
-        int limit = package.Length - Marshal.SizeOf<ResMeshCodecHeader>();
+        int size = Marshal.SizeOf<ResMeshCodecHeader>();
+        int limit = package.Length - size;
+
         for (int i = 12; i <= limit; ++i)
         {
-            if (MemoryMarshal.Read<uint>(package.Slice(i, 4)) == ResMeshCodecHeader.Magic)
+            if (MemoryMarshal.Read<uint>(package.Slice(i, 4)) != ResMeshCodecHeader.Magic)
+                continue;
+
+            if (IsPlausibleFmshHeader(package.Slice(i), package.Length - i - size))
                 return i;
         }
+
         return -1;
     }
+
+    /// <summary>
+    /// Whether a run of bytes starting with the FMSH magic is structurally a mesh-section header
+    /// rather than a coincidence in compressed data.
+    /// </summary>
+    public static bool IsPlausibleFmshHeader(ReadOnlySpan<byte> candidate, int trailingBytes)
+    {
+        if (candidate.Length < Marshal.SizeOf<ResMeshCodecHeader>())
+            return false;
+
+        ResMeshCodecHeader header = MemoryMarshal.Read<ResMeshCodecHeader>(candidate);
+
+        if (header.MagicValue != ResMeshCodecHeader.Magic)
+            return false;
+
+        if (!MeshCodec.IsUsableAlignment(header.IndexAlign) || !MeshCodec.IsUsableAlignment(header.VertexAlign))
+            return false;
+
+        if (header.CompHeader.GetCodecType() == CodecType.Invalid)
+            return false;
+
+        if (header.IndexOutputSize == 0 && header.VertexOutputSize == 0)
+            return false;
+
+        // The first frame is described by the header and has to fit in what follows it.
+        nuint frame = MeshCodec.GetFrameSize(header.CompHeader);
+
+        return frame != 0 && frame <= (nuint)(ulong)Math.Max(trailingBytes, 0);
+    }
+
+    private static bool IsBfres(ReadOnlySpan<byte> data) =>
+        data.Length >= 4
+        && data[0] == (byte)'F' && data[1] == (byte)'R' && data[2] == (byte)'E' && data[3] == (byte)'S';
 
     private static byte[] CompressPayload(ReadOnlySpan<byte> src, int level)
     {
