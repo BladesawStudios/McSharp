@@ -306,9 +306,14 @@ public static unsafe class MeshCodec
             Size = header->IndexOutputSize,
             Alignment = header->IndexAlign,
         };
+        // Retail rounds the absolute address here. That only agrees with the relative arithmetic the
+        // rest of the format uses - GetTotalDecompressedSize, TryGetMeshLayout - when dst itself is
+        // aligned to VertexAlign, which the game guarantees and a managed array does not beyond 8.
+        // Aligning the offset instead is identical whenever dst is aligned, and stops the decoded
+        // layout depending on where the caller's buffer happens to sit in memory.
         StreamContext vertexContext = new StreamContext
         {
-            Stream = (byte*)(((nuint)dst + header->VertexAlign + indexContext.Size - 1) & (nuint)(-(long)header->VertexAlign)),
+            Stream = dst + AlignUp(indexContext.Size, header->VertexAlign),
             Size = header->VertexOutputSize,
             Alignment = header->VertexAlign,
         };
@@ -576,6 +581,42 @@ public static unsafe class MeshCodec
             byte[] work = new byte[ZSTD_estimateDCtxSize() + 0x1000];
             return DecompressQuad(dst, src, work, out status) ? dst : null;
         }
+    }
+
+    /// <summary>
+    /// Works out where the index and vertex streams land inside a decoded package, given the
+    /// decoded bytes and the mesh section they were expanded from. This is the inverse of the
+    /// placement the decoder does, so it is how you read the streams back out in order to edit or
+    /// re-encode them.
+    /// </summary>
+    public static bool TryGetMeshLayout(ReadOnlySpan<byte> decodedBfres, ReadOnlySpan<byte> fmshSection,
+                                        out MeshLayout layout)
+    {
+        layout = default;
+
+        if (decodedBfres.Length < 0x20 || fmshSection.Length < FmshHeaderSize)
+            return false;
+
+        ResMeshCodecHeader header = MemoryMarshal.Read<ResMeshCodecHeader>(fmshSection);
+
+        if (header.MagicValue != ResMeshCodecHeader.Magic)
+            return false;
+
+        if (!IsUsableAlignment(header.IndexAlign) || !IsUsableAlignment(header.VertexAlign))
+            return false;
+
+        uint fileSize = MemoryMarshal.Read<uint>(decodedBfres.Slice(0x1c, 4));
+        uint align = Math.Max(header.IndexAlign, header.VertexAlign);
+
+        ulong indexOffset = AlignUp(AlignUp(fileSize, 8) + 0x120, align);
+        ulong vertexOffset = AlignUp(indexOffset + header.IndexOutputSize, header.VertexAlign);
+
+        if (vertexOffset + header.VertexOutputSize > uint.MaxValue)
+            return false;
+
+        layout = new MeshLayout((uint)indexOffset, header.IndexOutputSize, (uint)vertexOffset,
+                                header.VertexOutputSize, header.IndexAlign, header.VertexAlign);
+        return true;
     }
 
     /// <summary>

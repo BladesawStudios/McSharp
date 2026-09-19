@@ -57,6 +57,11 @@ internal sealed unsafe class ZStdCodec : ICodec
 
     public void Initialize(in StreamContext indexStream, in StreamContext vertexStream, uint param, StackAllocator allocator)
     {
+        // Retail skips the whole setup, and the workspace allocation with it, when there is no
+        // vertex stream; allocating anyway would overrun a WorkMemSize budgeted the retail way.
+        if (vertexStream.Size == 0)
+            return;
+
         nuint wkspSize = Zstd.DCtxWorkspaceSize;
         void* wksp = allocator.Alloc(wkspSize, 8);
         _dctx = Zstd.SetupDCtx(wksp, wkspSize);

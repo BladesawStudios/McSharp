@@ -80,9 +80,41 @@ matching vanilla. `CompressPayload` lets you substitute your own zstd implementa
 
 ### Encoding the mesh section
 
-McSharp decodes the FMSH vertex/index streams but does not re-encode them; `CompressMcWithFmsh`
-copies the existing mesh section through verbatim. That is enough to round-trip retail files and to
-edit anything in the BFRES body, but not to author new geometry.
+There are two ways to write a mesh section.
+
+**Copy the existing one through.** `Repack` and `CompressMcWithFmsh` do this, and it is what you
+want when you are editing the BFRES body and leaving the geometry alone. It is also the only way to
+produce a file that is byte-identical to vanilla.
+
+**Author new geometry with `FmshEncoder`.** McSharp cannot write Nintendo's codec type 2 entropy
+coding, but the container carries the codec type per section and the retail loader dispatches on it
+without restriction, so McSharp writes codec type 0 instead: the streams are stored verbatim and the
+runtime copies them straight out.
+
+```csharp
+// Read the existing geometry out of a decoded package.
+byte[] decoded = MeshCodec.DecompressMc(mc)!;
+int fmsh = McEncoder.FindFmshOffset(mc);
+MeshCodec.TryGetMeshLayout(decoded, mc.AsSpan(fmsh), out MeshLayout layout);
+
+ReadOnlySpan<byte> index = decoded.AsSpan((int)layout.IndexOffset, (int)layout.IndexSize);
+ReadOnlySpan<byte> vertex = decoded.AsSpan((int)layout.VertexOffset, (int)layout.VertexSize);
+
+// Write your own streams back out.
+byte[] section = FmshEncoder.EncodeUncompressed(newIndex, newVertex,
+                                                layout.IndexAlign, layout.VertexAlign);
+byte[] body = decoded.AsSpan(0, (int)BitConverter.ToUInt32(decoded, 0x1c)).ToArray();
+byte[] package = McEncoder.CompressMcWithFmsh(body, section,
+                                              McEncoder.GetTotalDecompressedSize(body, section));
+```
+
+The trade is size. Nothing in a type 0 section is compressed, so the mesh is as large as the raw GPU
+buffers - re-encoding every retail model this way takes the model set from 762 MB to 2.7 GB, about
+3.5x. The surrounding package is still zstd compressed as usual.
+
+Every retail model round-trips through this path with byte-identical vertex and index streams. That
+verifies the encoder against McSharp's decoder, which is a port of the game's; it is not a substitute
+for testing a file in the game.
 
 ## Malformed input
 
