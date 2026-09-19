@@ -86,10 +86,13 @@ internal sealed unsafe class ZStdCodec : ICodec
     {
         nuint sizeRead = 0;
         uint isNotCompressed = (uint)ctx.BitStream0.Read(1);
-        byte* currentPos = ctx.CurrentPos;
+        byte* basePos = ctx.CurrentPos;
         while (sizeRead < 0x25800)
         {
-            currentPos += sizeRead;
+            // Retail recomputes this from the frame base every iteration. Advancing the pointer
+            // incrementally instead adds the running total to a pointer the varint parse below has
+            // already moved, which drifts by one varint per block.
+            byte* currentPos = basePos + sizeRead;
 
             nuint outSize;
             void* outputBuffer;
@@ -131,7 +134,8 @@ internal sealed unsafe class ZStdCodec : ICodec
             Zstd.DecompressBlock(_dctx, outputBuffer, outSize, currentPos, inSize, isNotCompressed);
             isNotCompressed = (uint)ctx.BitStream0.Read(1);
         }
-        ctx.CurrentPos = currentPos;
+
+        ctx.CurrentPos = basePos + sizeRead;
     }
 }
 

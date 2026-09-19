@@ -2,6 +2,8 @@ using System;
 using System.Collections.Generic;
 using System.Runtime.InteropServices;
 using McSharp.Internal;
+using ZstdSharp.Unsafe;
+using static ZstdSharp.Unsafe.Methods;
 
 namespace McSharp;
 
@@ -49,7 +51,7 @@ public readonly struct MeshLayout
 /// buffers. The surrounding package is still zstd compressed as usual.
 /// </para>
 /// </remarks>
-public static class FmshEncoder
+public static unsafe class FmshEncoder
 {
     /// <summary>
     /// Bytes a codec type 0 frame carries. The runtime copies <c>min(remaining, 0x40000)</c> per
@@ -69,17 +71,7 @@ public static class FmshEncoder
     public static byte[] EncodeUncompressed(ReadOnlySpan<byte> indexStream, ReadOnlySpan<byte> vertexStream,
                                             byte indexAlign = 8, byte vertexAlign = 8)
     {
-        if (!MeshCodec.IsUsableAlignment(indexAlign))
-            throw new ArgumentOutOfRangeException(nameof(indexAlign), indexAlign, "Alignment must be a power of two.");
-
-        if (!MeshCodec.IsUsableAlignment(vertexAlign))
-            throw new ArgumentOutOfRangeException(nameof(vertexAlign), vertexAlign, "Alignment must be a power of two.");
-
-        if (indexStream.IsEmpty && vertexStream.IsEmpty)
-            throw new ArgumentException(
-                "A mesh section with neither an index nor a vertex stream carries no geometry. Clear " +
-                "the mesh flag at offset 0xee of the BFRES and use CompressMc instead.",
-                nameof(indexStream));
+        Validate(indexStream, vertexStream, indexAlign, vertexAlign);
 
         int[] frames = PlanFrames(indexStream.Length, vertexStream.Length);
         int total = HeaderSize;
@@ -91,7 +83,7 @@ public static class FmshEncoder
         Span<byte> span = section;
 
         WriteHeader(span, (uint)indexStream.Length, (uint)vertexStream.Length, indexAlign, vertexAlign,
-                    frames.Length == 0 ? 0u : (uint)frames[0]);
+                    frames.Length == 0 ? 0u : (uint)frames[0], CodecType.Null, WorkMemSizeForUncompressed);
 
         int pos = HeaderSize;
         int indexTaken = 0;
@@ -133,6 +125,254 @@ public static class FmshEncoder
     }
 
     /// <summary>
+    /// Bytes a codec type 1 block expands to. The runtime decodes <c>min(remaining, 0x20000)</c>
+    /// per block.
+    /// </summary>
+    public const int BlockPayloadSize = 0x20000;
+
+    /// <summary>
+    /// Input bytes a codec type 1 frame carries before the runtime closes it and starts the next.
+    /// </summary>
+    public const int FrameInputLimit = 0x25800;
+
+    /// <summary>
+    /// Builds a mesh section holding <paramref name="indexStream"/> and
+    /// <paramref name="vertexStream"/> as zstd blocks (codec type 1). Same geometry as
+    /// <see cref="EncodeUncompressed"/> at a fraction of the size, in exchange for a real scratch
+    /// buffer where a type 0 section needs almost none.
+    /// </summary>
+    public static byte[] EncodeZstd(ReadOnlySpan<byte> indexStream, ReadOnlySpan<byte> vertexStream,
+                                    byte indexAlign = 8, byte vertexAlign = 8, int level = 8)
+    {
+        Validate(indexStream, vertexStream, indexAlign, vertexAlign);
+
+        // The runtime skips codec setup entirely when the vertex stream is empty, leaving nothing
+        // that can decode the blocks, so a type 1 section has to carry one.
+        if (vertexStream.IsEmpty)
+            throw new ArgumentException(
+                "Codec type 1 cannot represent a mesh section with an empty vertex stream, because " +
+                "the runtime leaves the codec uninitialised in that case. Use EncodeUncompressed.",
+                nameof(vertexStream));
+
+        // The runtime decodes every block through one context, so matches reach back across block
+        // and stream boundaries. Compress from one contiguous buffer to match.
+        byte[] source = new byte[indexStream.Length + vertexStream.Length];
+        indexStream.CopyTo(source);
+        vertexStream.CopyTo(source.AsSpan(indexStream.Length));
+
+        List<Block> blocks = CompressBlocks(source, indexStream.Length, vertexStream.Length, level);
+        List<List<Block>> frames = GroupIntoFrames(blocks);
+        int[] sizes = SizeFrames(frames);
+
+        int total = HeaderSize;
+        foreach (int size in sizes)
+            total += size;
+
+        byte[] section = new byte[total];
+        WriteHeader(section, (uint)indexStream.Length, (uint)vertexStream.Length, indexAlign, vertexAlign,
+                    sizes.Length == 0 ? 0u : (uint)sizes[0], CodecType.ZStandard, WorkMemSizeForZstd);
+
+        int pos = HeaderSize;
+
+        for (int i = 0; i < frames.Count; ++i)
+        {
+            Span<byte> frame = section.AsSpan(pos, sizes[i]);
+            uint next = i + 1 < frames.Count ? (uint)sizes[i + 1] : 0;
+
+            int w = VByte.EncodeReversed(next, frame);
+            w += VByte.EncodeReversed(0, frame.Slice(w));
+
+            // One bit per block says whether it was stored rather than compressed. The runtime
+            // reads these backwards from the end of the frame, and takes one extra past the last
+            // block before it stops.
+            BitStreamWriter bits = default;
+
+            foreach (Block block in frames[i])
+            {
+                bits.Write(frame, block.Stored);
+
+                if (!block.Stored)
+                    w += VByte.EncodeForward((uint)block.Payload.Length, frame.Slice(w));
+
+                block.Payload.CopyTo(frame.Slice(w));
+                w += block.Payload.Length;
+            }
+
+            bits.Write(frame, false);
+
+            if (w + BitStreamWriter.ByteLength(bits.Count) > frame.Length)
+                throw new InvalidOperationException("Frame data and bit stream overlap.");
+
+            pos += sizes[i];
+        }
+
+        if (pos != total)
+            throw new InvalidOperationException($"Mesh section came out at {pos} bytes, planned {total}.");
+
+        return section;
+    }
+
+    private sealed class Block
+    {
+        public byte[] Payload = Array.Empty<byte>();
+        public bool Stored;
+
+        /// <summary>Input bytes the runtime charges against the frame limit for this block.</summary>
+        public int Cost => Payload.Length + (Stored ? 0 : VByte.ForwardLength((uint)Payload.Length));
+    }
+
+    private static List<Block> CompressBlocks(byte[] source, int indexSize, int vertexSize, int level)
+    {
+        List<int> outSizes = new List<int>();
+
+        for (int off = 0; off < indexSize; off += BlockPayloadSize)
+            outSizes.Add(Math.Min(BlockPayloadSize, indexSize - off));
+
+        for (int off = 0; off < vertexSize; off += BlockPayloadSize)
+            outSizes.Add(Math.Min(BlockPayloadSize, vertexSize - off));
+
+        List<Block> blocks = new List<Block>(outSizes.Count);
+
+        ZSTD_CCtx_s* cctx = ZSTD_createCCtx();
+
+        if (cctx == null)
+            throw new InvalidOperationException("Failed to create a zstd compression context.");
+
+        try
+        {
+            nuint begin = ZSTD_compressBegin(cctx, level);
+
+            if (ZSTD_isError(begin))
+                throw new InvalidOperationException($"zstd compressBegin failed: {ZSTD_getErrorName(begin)}");
+
+            if (ZSTD_getBlockSize(cctx) < BlockPayloadSize)
+                throw new InvalidOperationException(
+                    $"zstd level {level} gives a {ZSTD_getBlockSize(cctx)} byte block limit, under the " +
+                    $"{BlockPayloadSize} the format needs. Use a level with a larger window.");
+
+            byte[] scratch = new byte[ZSTD_compressBound(BlockPayloadSize)];
+            int offset = 0;
+
+            fixed (byte* pSource = source)
+            fixed (byte* pScratch = scratch)
+            {
+                foreach (int outSize in outSizes)
+                {
+                    nuint written = ZSTD_compressBlock(cctx, pScratch, (nuint)scratch.Length,
+                                                       pSource + offset, (nuint)outSize);
+
+                    if (ZSTD_isError(written))
+                        throw new InvalidOperationException($"zstd compressBlock failed: {ZSTD_getErrorName(written)}");
+
+                    Block block = new Block();
+
+                    // Zero means zstd judged the block incompressible and wrote nothing. That is the
+                    // only case we may store raw: discarding a block it did produce would leave the
+                    // decoder a block behind on entropy tables.
+                    if (written == 0)
+                    {
+                        block.Stored = true;
+                        block.Payload = source.AsSpan(offset, outSize).ToArray();
+                    }
+                    else
+                    {
+                        block.Payload = scratch.AsSpan(0, (int)written).ToArray();
+                    }
+
+                    blocks.Add(block);
+                    offset += outSize;
+                }
+            }
+        }
+        finally
+        {
+            ZSTD_freeCCtx(cctx);
+        }
+
+        return blocks;
+    }
+
+    /// <summary>
+    /// Splits blocks the way the runtime does: it keeps pulling blocks out of one frame until the
+    /// input it has read reaches <see cref="FrameInputLimit"/>, and then the frame is done.
+    /// </summary>
+    private static List<List<Block>> GroupIntoFrames(List<Block> blocks)
+    {
+        List<List<Block>> frames = new List<List<Block>>();
+        List<Block> current = new List<Block>();
+        int cost = 0;
+
+        foreach (Block block in blocks)
+        {
+            current.Add(block);
+            cost += block.Cost;
+
+            if (cost >= FrameInputLimit)
+            {
+                frames.Add(current);
+                current = new List<Block>();
+                cost = 0;
+            }
+        }
+
+        if (current.Count > 0)
+            frames.Add(current);
+
+        return frames;
+    }
+
+    private static int[] SizeFrames(List<List<Block>> frames)
+    {
+        int[] sizes = new int[frames.Count];
+        int next = 0;
+
+        for (int i = frames.Count - 1; i >= 0; --i)
+        {
+            int data = VByte.ReversedLength((uint)next) + VByte.ReversedLength(0);
+
+            foreach (Block block in frames[i])
+                data += block.Cost;
+
+            // The bit stream sits at the end of the frame and the reader primes itself eight bytes
+            // below that end, so a frame is never shorter than eight bytes.
+            int size = data + BitStreamWriter.ByteLength(frames[i].Count + 1);
+            sizes[i] = Math.Max(size, 8);
+            next = sizes[i];
+        }
+
+        return sizes;
+    }
+
+    /// <summary>
+    /// Scratch a type 1 section needs: the allocator header, the codec object and a static zstd
+    /// decompression context.
+    /// </summary>
+    public static uint WorkMemSizeForZstd
+    {
+        get
+        {
+            uint needed = (uint)(StackAllocator.HeaderSize + 0x40 + Zstd.DCtxWorkspaceSize);
+            return Math.Max(0x28000u, (needed + 0xfff) & ~0xfffu);
+        }
+    }
+
+    private static void Validate(ReadOnlySpan<byte> indexStream, ReadOnlySpan<byte> vertexStream,
+                                byte indexAlign, byte vertexAlign)
+    {
+        if (!MeshCodec.IsUsableAlignment(indexAlign))
+            throw new ArgumentOutOfRangeException(nameof(indexAlign), indexAlign, "Alignment must be a power of two.");
+
+        if (!MeshCodec.IsUsableAlignment(vertexAlign))
+            throw new ArgumentOutOfRangeException(nameof(vertexAlign), vertexAlign, "Alignment must be a power of two.");
+
+        if (indexStream.IsEmpty && vertexStream.IsEmpty)
+            throw new ArgumentException(
+                "A mesh section with neither an index nor a vertex stream carries no geometry. Clear " +
+                "the mesh flag at offset 0xee of the BFRES and use CompressMc instead.",
+                nameof(indexStream));
+    }
+
+    /// <summary>
     /// Frame sizes, in order. A frame is its two leading sizes plus its payload, and each frame has
     /// to declare the next one's length, so the list is costed from the back.
     /// </summary>
@@ -159,19 +399,19 @@ public static class FmshEncoder
     }
 
     private static void WriteHeader(Span<byte> dst, uint indexSize, uint vertexSize, byte indexAlign,
-                                    byte vertexAlign, uint firstFrameSize)
+                                    byte vertexAlign, uint firstFrameSize, CodecType codec, uint workMemSize)
     {
         ResMeshCodecHeader header = default;
         header.MagicValue = ResMeshCodecHeader.Magic;
         header.Version = Version;
-        header.WorkMemSize = WorkMemSizeForUncompressed;
+        header.WorkMemSize = workMemSize;
         header.IndexOutputSize = indexSize;
         header.VertexOutputSize = vertexSize;
         header.IndexAlign = indexAlign;
         header.VertexAlign = vertexAlign;
 
-        // Codec type 0 in the low two bits, no codec parameter above them.
-        header.CompHeader.Flags = (ushort)CodecType.Null;
+        // Codec type in the low two bits, no codec parameter above them.
+        header.CompHeader.Flags = (ushort)codec;
         header.CompHeader.SizeInfo.StreamOffset.Set(firstFrameSize);
         header.CompHeader.SizeInfo.EndOffset.Set(0);
 

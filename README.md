@@ -108,13 +108,27 @@ byte[] package = McEncoder.CompressMcWithFmsh(body, section,
                                               McEncoder.GetTotalDecompressedSize(body, section));
 ```
 
-The trade is size. Nothing in a type 0 section is compressed, so the mesh is as large as the raw GPU
-buffers - re-encoding every retail model this way takes the model set from 762 MB to 2.7 GB, about
-3.5x. The surrounding package is still zstd compressed as usual.
+`EncodeZstd` is the same thing with the streams stored as zstd blocks (codec type 1) rather than
+raw, and is what you normally want:
 
-Every retail model round-trips through this path with byte-identical vertex and index streams. That
-verifies the encoder against McSharp's decoder, which is a port of the game's; it is not a substitute
-for testing a file in the game.
+```csharp
+byte[] section = FmshEncoder.EncodeZstd(newIndex, newVertex, layout.IndexAlign, layout.VertexAlign);
+```
+
+Re-encoding every retail model measures the trade. Against 762 MB of vanilla files, `EncodeZstd`
+gives 1274 MB (1.67x) and `EncodeUncompressed` 2706 MB (3.55x). Type 2, which only Nintendo can
+write, is the 762 MB. Type 1 also needs a real scratch buffer, roughly 160 KB, where type 0 needs
+almost none - size it from `GetRequiredWorkBufferSize` as usual.
+
+One limit: codec type 1 cannot carry an empty vertex stream, because the runtime skips codec setup
+entirely in that case and nothing would decode the blocks. `EncodeZstd` throws rather than write a
+section that cannot be read; use `EncodeUncompressed` for that. No retail model hits it.
+
+Every retail model round-trips through both paths with byte-identical vertex and index streams, and
+both have been loaded by the game. Codec type 1 was tested at one, two and five frames and codec
+type 0 on a single-frame model, all rendering identically to vanilla. A control built the same way
+but with half the index buffer zeroed rendered correspondingly broken, which confirms the runtime is
+reading the authored section rather than ignoring it.
 
 ## Malformed input
 

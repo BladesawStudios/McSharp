@@ -25,12 +25,21 @@ internal static unsafe class VByte
         return result;
     }
 
+    /// <summary>
+    /// Decodes a varint and reports how many bytes it occupied, writing the value to
+    /// <paramref name="output"/>.
+    /// </summary>
     public static uint Decode(ref byte* data, ref uint output)
     {
         byte lead = *data++;
 
         if (lead < 0x80)
-            return lead;
+        {
+            // A single byte is one byte long and holds the whole value; returning the value here
+            // instead reported a zero length to every caller of a short varint.
+            output = lead;
+            return 1;
+        }
 
         uint result = (uint)(lead & 0x7f);
         uint size = 1;
@@ -77,6 +86,35 @@ internal static unsafe class VByte
             value >>= 7;
         }
         dst[n++] = (byte)value;
+        return n;
+    }
+
+    /// <summary>Number of bytes <see cref="EncodeForward"/> will emit for <paramref name="value"/>.</summary>
+    public static int ForwardLength(uint value)
+    {
+        int n = 1;
+        while (value >= 0x80)
+        {
+            value >>= 7;
+            ++n;
+        }
+        return n;
+    }
+
+    /// <summary>
+    /// Inverse of <see cref="Decode(ref byte*)"/>: seven bits per byte, most significant group
+    /// first, continuation bit set on every byte but the last.
+    /// </summary>
+    public static int EncodeForward(uint value, Span<byte> dst)
+    {
+        int n = ForwardLength(value);
+
+        for (int i = 0; i < n; ++i)
+        {
+            byte group = (byte)((value >> (7 * (n - 1 - i))) & 0x7f);
+            dst[i] = i + 1 < n ? (byte)(group | 0x80) : group;
+        }
+
         return n;
     }
 
