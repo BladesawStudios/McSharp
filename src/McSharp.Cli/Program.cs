@@ -67,22 +67,28 @@ internal static class Program
         }
     }
 
-    private static byte[]? DecodeOne(string file, byte[] work)
+    private static byte[]? DecodeOne(string file, byte[] work, out McStatus status)
     {
         byte[] data = File.ReadAllBytes(file);
 
         if (Path.GetExtension(file) == ".chunk")
         {
             if (!MeshCodec.TryReadChunkHeader(data, out ResChunkHeader ch))
+            {
+                status = McStatus.NotAPackage;
                 return null;
+            }
             byte[] outBuf = new byte[ch.DecompressedSize];
-            return MeshCodec.DecompressChunk(outBuf, data, work) ? outBuf : null;
+            return MeshCodec.DecompressChunk(outBuf, data, work, out status) ? outBuf : null;
         }
 
         if (!MeshCodec.TryReadPackageHeader(data, out ResMeshCodecPackageHeader ph))
+        {
+            status = McStatus.NotAPackage;
             return null;
+        }
         byte[] dst = new byte[ph.GetDecompressedSize()];
-        return MeshCodec.DecompressMc(dst, data, work) ? dst : null;
+        return MeshCodec.DecompressMc(dst, data, work, out status) ? dst : null;
     }
 
     private static bool Decompress(string input, string outputDir)
@@ -93,9 +99,10 @@ internal static class Program
         foreach (string file in EnumerateInputs(input))
         {
             byte[]? result;
+            McStatus status;
             try
             {
-                result = DecodeOne(file, work);
+                result = DecodeOne(file, work, out status);
             }
             catch (Exception ex)
             {
@@ -106,7 +113,7 @@ internal static class Program
 
             if (result == null)
             {
-                Console.WriteLine($"[FAIL] {Path.GetFileName(file)}");
+                Console.WriteLine($"[FAIL] {Path.GetFileName(file)}: {status}");
                 failed++;
                 continue;
             }
@@ -166,9 +173,10 @@ internal static class Program
             }
 
             byte[]? result;
+            McStatus status;
             try
             {
-                result = DecodeOne(file, work);
+                result = DecodeOne(file, work, out status);
             }
             catch (Exception ex)
             {
@@ -179,7 +187,7 @@ internal static class Program
 
             if (result == null)
             {
-                Console.WriteLine($"[FAIL] {stem}: decode returned failure");
+                Console.WriteLine($"[FAIL] {stem}: {status}");
                 failed++;
                 continue;
             }

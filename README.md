@@ -94,6 +94,26 @@ The `byte[]`-returning overloads allocate from sizes declared in the file, so th
 refuse anything over `MeshCodec.MaxDecompressedSize` (1 GB) or `DefaultWorkBufferSize`. The
 `Span<byte>` overloads do not allocate and leave that budget to you.
 
+Every decode entry point has an overload reporting why it failed, which is what you want in a batch
+tool: a file you should skip is a different problem from a buffer you sized wrongly.
+
+```csharp
+if (!MeshCodec.DecompressMc(dst, mc, work, out McStatus status))
+{
+    switch (status)
+    {
+        case McStatus.NotAPackage:          // not a .mc - skip it
+        case McStatus.TruncatedStream:      // damaged file
+        case McStatus.CorruptStream:
+        case McStatus.InvalidMeshSection:
+            break;
+        case McStatus.WorkBufferTooSmall:   // your buffer, not the file
+            work = new byte[MeshCodec.GetRequiredWorkBufferSize(mc)];
+            break;
+    }
+}
+```
+
 ## Notes
 
 ### zstd

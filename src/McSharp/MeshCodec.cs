@@ -92,25 +92,32 @@ public static unsafe class MeshCodec
 
     /// <summary>
     /// Decodes a package, allocating the output and scratch buffers from sizes declared in the file.
-    /// Returns <see langword="null"/> if the input is not a package McSharp can decode, including
-    /// when its declared sizes are inconsistent or exceed <see cref="MaxDecompressedSize"/>.
+    /// Returns <see langword="null"/> if the input is not a package McSharp can decode; use the
+    /// <see cref="McStatus"/> overload to find out why.
     /// </summary>
-    public static byte[]? DecompressMc(ReadOnlySpan<byte> src)
+    public static byte[]? DecompressMc(ReadOnlySpan<byte> src) => DecompressMc(src, out _);
+
+    /// <inheritdoc cref="DecompressMc(ReadOnlySpan{byte})"/>
+    public static byte[]? DecompressMc(ReadOnlySpan<byte> src, out McStatus status)
     {
         if (!TryReadPackageHeader(src, out ResMeshCodecPackageHeader header))
+        {
+            status = McStatus.NotAPackage;
             return null;
+        }
 
         uint decompressedSize = header.GetDecompressedSize();
-        if (decompressedSize > MaxDecompressedSize)
-            return null;
-
         uint workSize = GetRequiredWorkBufferSize(src);
-        if (workSize > DefaultWorkBufferSize)
+
+        if (decompressedSize > MaxDecompressedSize || workSize > DefaultWorkBufferSize)
+        {
+            status = McStatus.SizeLimitExceeded;
             return null;
+        }
 
         byte[] dst = new byte[decompressedSize];
         byte[] work = new byte[workSize];
-        return DecompressMc(dst, src, work) ? dst : null;
+        return DecompressMc(dst, src, work, out status) ? dst : null;
     }
 
     /// <summary>
@@ -118,45 +125,54 @@ public static unsafe class MeshCodec
     /// throwing for malformed or truncated input.
     /// </summary>
     public static bool DecompressMc(Span<byte> dst, ReadOnlySpan<byte> src, Span<byte> workBuffer)
+        => DecompressMc(dst, src, workBuffer, out _);
+
+    /// <inheritdoc cref="DecompressMc(Span{byte}, ReadOnlySpan{byte}, Span{byte})"/>
+    public static bool DecompressMc(Span<byte> dst, ReadOnlySpan<byte> src, Span<byte> workBuffer, out McStatus status)
     {
         if (src.Length < 0xc)
+        {
+            status = McStatus.NotAPackage;
             return false;
+        }
 
         try
         {
             fixed (byte* pDst = dst)
             fixed (byte* pSrc = src)
             fixed (byte* pWork = workBuffer)
-                return DecompressMcCore(pDst, (nuint)dst.Length, pSrc, (nuint)src.Length, pWork, (nuint)workBuffer.Length);
+                status = DecompressMcCore(pDst, (nuint)dst.Length, pSrc, (nuint)src.Length, pWork, (nuint)workBuffer.Length);
         }
         catch (MeshCodecException)
         {
-            return false;
+            status = McStatus.WorkBufferTooSmall;
         }
+
+        return status == McStatus.Ok;
     }
 
-    private static bool DecompressMcCore(byte* dst, nuint dstSize, byte* src, nuint srcSize, byte* workBuffer, nuint workBufferSize)
+    private static McStatus DecompressMcCore(byte* dst, nuint dstSize, byte* src, nuint srcSize, byte* workBuffer, nuint workBufferSize)
     {
         if (srcSize < 0xc || src == null)
-            return false;
+            return McStatus.NotAPackage;
 
         ResMeshCodecPackageHeader* header = (ResMeshCodecPackageHeader*)src;
 
         if (header->MagicValue != ResMeshCodecPackageHeader.Magic)
-            return false;
+            return McStatus.NotAPackage;
 
         if (header->VersionMajor != 0 || header->VersionMinor > 1)
-            return false;
+            return McStatus.UnsupportedVersion;
 
         nuint decompressedSize = header->GetDecompressedSize();
 
         if (dstSize < decompressedSize)
-            return false;
+            return McStatus.DestinationTooSmall;
 
         ZSTD_DCtx_s* dctx = ZSTD_createDCtx();
 
         if (dctx == null)
-            return false;
+            return McStatus.CorruptStream;
 
         byte* ptr;
         try
@@ -173,11 +189,11 @@ public static unsafe class MeshCodec
                 // zstd asks for a fixed number of bytes at a time; on a truncated file that would
                 // walk off the end of src.
                 if (size > remaining)
-                    return false;
+                    return McStatus.TruncatedStream;
 
                 nuint result = ZSTD_decompressContinue(dctx, output, remainingOutput, ptr, size);
                 if (ZSTD_isError(result))
-                    return false;
+                    return McStatus.CorruptStream;
                 ptr += size;
                 remaining -= size;
                 size = ZSTD_nextSrcSizeToDecompress(dctx);
@@ -193,36 +209,36 @@ public static unsafe class MeshCodec
         // Everything below is driven by fields inside the payload we just decompressed and by the
         // trailing FMSH header. None of it is trusted: every offset is checked against dst and src.
         if (decompressedSize <= 0xee || ((dst[0xee] >> 3) & 1) == 0)
-            return true;
+            return McStatus.Ok;
 
         uint fileSize = *(uint*)(dst + 0x1c);
 
         if (fileSize > decompressedSize)
-            return false;
+            return McStatus.InvalidMeshSection;
 
         byte* fmshStart = Align(ptr, 4);
         nuint fmshOffset = (nuint)(fmshStart - src);
 
         if (fmshOffset > srcSize || (nuint)FmshHeaderSize > srcSize - fmshOffset)
-            return false;
+            return McStatus.TruncatedStream;
 
         ResMeshCodecHeader* fmshHeader = (ResMeshCodecHeader*)fmshStart;
 
         if (fmshHeader->MagicValue != ResMeshCodecHeader.Magic)
-            return false;
+            return McStatus.InvalidMeshSection;
 
         uint align = Math.Max(fmshHeader->VertexAlign, fmshHeader->IndexAlign);
 
         if (!IsUsableAlignment(align))
-            return false;
+            return McStatus.InvalidMeshSection;
 
         ulong outputOffset = AlignUp(AlignUp(fileSize, 8) + 0x120, align);
 
         if (outputOffset > decompressedSize)
-            return false;
+            return McStatus.InvalidMeshSection;
 
         if (workBufferSize < fmshHeader->WorkMemSize)
-            return false;
+            return McStatus.WorkBufferTooSmall;
 
         NativeMemory.Clear(dst + fileSize, dstSize - fileSize);
 
@@ -230,8 +246,10 @@ public static unsafe class MeshCodec
         sizeHeader[0] = (uint)outputOffset;
         sizeHeader[1] = (uint)decompressedSize;
 
-        return DecompressFmshCore(dst + outputOffset, (nuint)(decompressedSize - outputOffset), fmshStart,
-                                  srcSize - fmshOffset, workBuffer, workBufferSize) == 0;
+        DecompressFmshCore(dst + outputOffset, (nuint)(decompressedSize - outputOffset), fmshStart,
+                           srcSize - fmshOffset, workBuffer, workBufferSize, out McStatus status);
+
+        return status;
     }
 
     /// <summary>
@@ -239,32 +257,48 @@ public static unsafe class MeshCodec
     /// non-zero status for malformed input; it does not throw.
     /// </summary>
     public static uint DecompressFmsh(Span<byte> dst, ReadOnlySpan<byte> src, Span<byte> workBuffer)
+        => DecompressFmsh(dst, src, workBuffer, out _);
+
+    /// <inheritdoc cref="DecompressFmsh(Span{byte}, ReadOnlySpan{byte}, Span{byte})"/>
+    public static uint DecompressFmsh(Span<byte> dst, ReadOnlySpan<byte> src, Span<byte> workBuffer, out McStatus status)
     {
         try
         {
             fixed (byte* pDst = dst)
             fixed (byte* pSrc = src)
             fixed (byte* pWork = workBuffer)
-                return DecompressFmshCore(pDst, (nuint)dst.Length, pSrc, (nuint)src.Length, pWork, (nuint)workBuffer.Length);
+                return DecompressFmshCore(pDst, (nuint)dst.Length, pSrc, (nuint)src.Length, pWork,
+                                          (nuint)workBuffer.Length, out status);
         }
         catch (MeshCodecException)
         {
+            status = McStatus.WorkBufferTooSmall;
             return 0x1c;
         }
     }
 
-    private static uint DecompressFmshCore(byte* dst, nuint dstSize, byte* src, nuint srcSize, byte* workBuffer, nuint workBufferSize)
+    private static uint DecompressFmshCore(byte* dst, nuint dstSize, byte* src, nuint srcSize, byte* workBuffer,
+                                           nuint workBufferSize, out McStatus status)
     {
         if (srcSize < (nuint)FmshHeaderSize)
+        {
+            status = McStatus.TruncatedStream;
             return 0x1c;
+        }
 
         ResMeshCodecHeader* header = (ResMeshCodecHeader*)src;
 
         if (header->MagicValue != ResMeshCodecHeader.Magic)
+        {
+            status = McStatus.InvalidMeshSection;
             return 0x1c;
+        }
 
         if (!IsUsableAlignment(header->IndexAlign) || !IsUsableAlignment(header->VertexAlign))
+        {
+            status = McStatus.InvalidMeshSection;
             return 0x1c;
+        }
 
         StreamContext indexContext = new StreamContext
         {
@@ -282,10 +316,16 @@ public static unsafe class MeshCodec
         // The stream placement above comes straight from the file; both have to land inside dst.
         if (!Fits(dst, dstSize, indexContext.Stream, indexContext.Size) ||
             !Fits(dst, dstSize, vertexContext.Stream, vertexContext.Size))
+        {
+            status = McStatus.InvalidMeshSection;
             return 0x1c;
+        }
 
         if (workBufferSize < header->WorkMemSize)
+        {
+            status = McStatus.WorkBufferTooSmall;
             return 0x1c;
+        }
 
         int result = StackAllocator.Create(out StackAllocator? allocator, indexContext, vertexContext,
                                            workBuffer, header->WorkMemSize, header->CompHeader, 8);
@@ -302,11 +342,23 @@ public static unsafe class MeshCodec
                 while (result > -1)
                 {
                     if (blockSize == 0)
-                        return offset != srcSize ? 0x1cu : 0u;
+                    {
+                        if (offset != srcSize)
+                        {
+                            status = McStatus.CorruptStream;
+                            return 0x1c;
+                        }
+
+                        status = McStatus.Ok;
+                        return 0;
+                    }
 
                     // Each frame declares its own length, which has to stay inside src.
                     if ((nuint)blockSize > srcSize - offset)
+                    {
+                        status = McStatus.TruncatedStream;
                         return 0x1c;
+                    }
 
                     offset += (uint)blockSize;
                     result = allocator!.DecompressFrame(pos, (nuint)blockSize);
@@ -315,7 +367,9 @@ public static unsafe class MeshCodec
                 }
             }
 
-            return StackAllocator.ConvertResult((ulong)(long)result);
+            uint converted = StackAllocator.ConvertResult((ulong)(long)result);
+            status = converted == 0 ? McStatus.Ok : McStatus.CorruptStream;
+            return converted;
         }
         finally
         {
@@ -325,20 +379,29 @@ public static unsafe class MeshCodec
 
     /// <summary>
     /// Decodes a terrain chunk, allocating the output and scratch buffers from sizes declared in the
-    /// file. Returns <see langword="null"/> for a header whose sizes are inconsistent or exceed
-    /// <see cref="MaxDecompressedSize"/>.
+    /// file. Returns <see langword="null"/> on failure; use the <see cref="McStatus"/> overload to
+    /// find out why.
     /// </summary>
-    public static byte[]? DecompressChunk(ReadOnlySpan<byte> src)
+    public static byte[]? DecompressChunk(ReadOnlySpan<byte> src) => DecompressChunk(src, out _);
+
+    /// <inheritdoc cref="DecompressChunk(ReadOnlySpan{byte})"/>
+    public static byte[]? DecompressChunk(ReadOnlySpan<byte> src, out McStatus status)
     {
         if (!TryReadChunkHeader(src, out ResChunkHeader header))
+        {
+            status = McStatus.NotAPackage;
             return null;
+        }
 
         if (header.DecompressedSize > MaxDecompressedSize || header.WorkMemSize > DefaultWorkBufferSize)
+        {
+            status = McStatus.SizeLimitExceeded;
             return null;
+        }
 
         byte[] dst = new byte[header.DecompressedSize];
         byte[] work = new byte[header.WorkMemSize];
-        return DecompressChunk(dst, src, work) ? dst : null;
+        return DecompressChunk(dst, src, work, out status) ? dst : null;
     }
 
     /// <summary>
@@ -346,38 +409,47 @@ public static unsafe class MeshCodec
     /// than throwing for malformed or truncated input.
     /// </summary>
     public static bool DecompressChunk(Span<byte> dst, ReadOnlySpan<byte> src, Span<byte> workBuffer)
+        => DecompressChunk(dst, src, workBuffer, out _);
+
+    /// <inheritdoc cref="DecompressChunk(Span{byte}, ReadOnlySpan{byte}, Span{byte})"/>
+    public static bool DecompressChunk(Span<byte> dst, ReadOnlySpan<byte> src, Span<byte> workBuffer, out McStatus status)
     {
         if (src.Length < 0x1c)
+        {
+            status = McStatus.NotAPackage;
             return false;
+        }
 
         try
         {
             fixed (byte* pDst = dst)
             fixed (byte* pSrc = src)
             fixed (byte* pWork = workBuffer)
-                return DecompressChunkCore(pDst, (nuint)dst.Length, pSrc, (nuint)src.Length, pWork, (nuint)workBuffer.Length);
+                status = DecompressChunkCore(pDst, (nuint)dst.Length, pSrc, (nuint)src.Length, pWork, (nuint)workBuffer.Length);
         }
         catch (MeshCodecException)
         {
-            return false;
+            status = McStatus.WorkBufferTooSmall;
         }
+
+        return status == McStatus.Ok;
     }
 
-    private static bool DecompressChunkCore(byte* dst, nuint dstSize, byte* src, nuint srcSize, byte* workBuffer, nuint workBufferSize)
+    private static McStatus DecompressChunkCore(byte* dst, nuint dstSize, byte* src, nuint srcSize, byte* workBuffer, nuint workBufferSize)
     {
         if (srcSize < 0x1c)
-            return false;
+            return McStatus.NotAPackage;
 
         ResChunkHeader* header = (ResChunkHeader*)src;
 
         if (dstSize < header->DecompressedSize)
-            return false;
+            return McStatus.DestinationTooSmall;
 
         if (workBufferSize < header->WorkMemSize)
-            return false;
+            return McStatus.WorkBufferTooSmall;
 
         if (!IsConsistentChunkHeader(*header))
-            return false;
+            return McStatus.NotAPackage;
 
         StreamContext indexContext = new StreamContext
         {
@@ -407,10 +479,10 @@ public static unsafe class MeshCodec
                 while (result > -1)
                 {
                     if (blockSize == 0)
-                        return offset == srcSize;
+                        return offset == srcSize ? McStatus.Ok : McStatus.CorruptStream;
 
                     if ((nuint)blockSize > srcSize - offset)
-                        return false;
+                        return McStatus.TruncatedStream;
 
                     offset += (uint)blockSize;
                     result = allocator!.DecompressFrame(pos, (nuint)blockSize);
@@ -419,7 +491,7 @@ public static unsafe class MeshCodec
                 }
             }
 
-            return StackAllocator.ConvertResult((ulong)(long)result) == 0;
+            return StackAllocator.ConvertResult((ulong)(long)result) == 0 ? McStatus.Ok : McStatus.CorruptStream;
         }
         finally
         {
@@ -428,9 +500,16 @@ public static unsafe class MeshCodec
     }
 
     public static bool DecompressQuad(Span<byte> dst, ReadOnlySpan<byte> src, Span<byte> workBuffer)
+        => DecompressQuad(dst, src, workBuffer, out _);
+
+    /// <inheritdoc cref="DecompressQuad(Span{byte}, ReadOnlySpan{byte}, Span{byte})"/>
+    public static bool DecompressQuad(Span<byte> dst, ReadOnlySpan<byte> src, Span<byte> workBuffer, out McStatus status)
     {
         if (src.Length < 4)
+        {
+            status = McStatus.NotAPackage;
             return false;
+        }
 
         fixed (byte* pDst = dst)
         fixed (byte* pSrc = src)
@@ -440,36 +519,62 @@ public static unsafe class MeshCodec
             nuint frameSize = (nuint)src.Length - 4;
 
             if ((nuint)workBuffer.Length < ZSTD_estimateDCtxSize())
+            {
+                status = McStatus.WorkBufferTooSmall;
                 return false;
+            }
 
             ulong decompressedSize = ZSTD_getFrameContentSize(frameHeader, frameSize);
             if ((ulong)dst.Length < decompressedSize)
+            {
+                status = McStatus.DestinationTooSmall;
                 return false;
+            }
 
             ZSTD_DCtx_s* dctx = ZSTD_initStaticDCtx(pWork, (nuint)workBuffer.Length);
             if (dctx == null)
+            {
+                status = McStatus.WorkBufferTooSmall;
                 return false;
+            }
 
             nuint result = ZSTD_decompressDCtx(dctx, pDst, (nuint)dst.Length, frameHeader, frameSize);
 
-            return !ZSTD_isError(result);
+            status = ZSTD_isError(result) ? McStatus.CorruptStream : McStatus.Ok;
+            return status == McStatus.Ok;
         }
     }
 
-    public static byte[]? DecompressQuad(ReadOnlySpan<byte> src)
+    public static byte[]? DecompressQuad(ReadOnlySpan<byte> src) => DecompressQuad(src, out _);
+
+    /// <inheritdoc cref="DecompressQuad(ReadOnlySpan{byte})"/>
+    public static byte[]? DecompressQuad(ReadOnlySpan<byte> src, out McStatus status)
     {
         if (src.Length < 4)
+        {
+            status = McStatus.NotAPackage;
             return null;
+        }
 
         fixed (byte* pSrc = src)
         {
             ulong size = ZSTD_getFrameContentSize(pSrc + 4, (nuint)src.Length - 4);
-            if (size == ulong.MaxValue || size == ulong.MaxValue - 1 || size > MaxDecompressedSize)
+
+            if (size == ulong.MaxValue || size == ulong.MaxValue - 1)
+            {
+                status = McStatus.NotAPackage;
                 return null;
+            }
+
+            if (size > MaxDecompressedSize)
+            {
+                status = McStatus.SizeLimitExceeded;
+                return null;
+            }
 
             byte[] dst = new byte[size];
             byte[] work = new byte[ZSTD_estimateDCtxSize() + 0x1000];
-            return DecompressQuad(dst, src, work) ? dst : null;
+            return DecompressQuad(dst, src, work, out status) ? dst : null;
         }
     }
 
