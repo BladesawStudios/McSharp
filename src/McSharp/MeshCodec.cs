@@ -10,19 +10,10 @@ public static unsafe class MeshCodec
 {
     public const int DefaultWorkBufferSize = 0x10000000;
 
-    /// <summary>
-    /// Ceiling the <c>byte[]</c>-returning convenience overloads place on a size read out of a file
-    /// header before allocating for it. The <see cref="Span{T}"/> overloads do not allocate and are
-    /// not subject to it.
-    /// </summary>
     public const uint MaxDecompressedSize = 0x40000000;
 
     private static readonly int FmshHeaderSize = Marshal.SizeOf<ResMeshCodecHeader>();
 
-    /// <summary>
-    /// Whether denormal half floats are flushed to zero while decoding. This is per-thread: set it
-    /// on the thread that will do the decoding.
-    /// </summary>
     public static bool FlushDenormalHalves
     {
         get => FloatMath.FlushDenormalHalves;
@@ -74,7 +65,6 @@ public static unsafe class MeshCodec
         if (header.CompHeader.GetCodecType() == CodecType.Invalid)
             return false;
 
-        // The two streams are laid out back to back inside the decompressed buffer.
         if (header.VertexOutputSize > header.DecompressedSize)
             return false;
 
@@ -90,14 +80,8 @@ public static unsafe class MeshCodec
         return MemoryMarshal.Read<ResMeshCodecHeader>(package.Slice(offset, FmshHeaderSize)).WorkMemSize;
     }
 
-    /// <summary>
-    /// Decodes a package, allocating the output and scratch buffers from sizes declared in the file.
-    /// Returns <see langword="null"/> if the input is not a package McSharp can decode; use the
-    /// <see cref="McStatus"/> overload to find out why.
-    /// </summary>
     public static byte[]? DecompressMc(ReadOnlySpan<byte> src) => DecompressMc(src, out _);
 
-    /// <inheritdoc cref="DecompressMc(ReadOnlySpan{byte})"/>
     public static byte[]? DecompressMc(ReadOnlySpan<byte> src, out McStatus status)
     {
         if (!TryReadPackageHeader(src, out ResMeshCodecPackageHeader header))
@@ -120,14 +104,9 @@ public static unsafe class MeshCodec
         return DecompressMc(dst, src, work, out status) ? dst : null;
     }
 
-    /// <summary>
-    /// Decodes a package into <paramref name="dst"/>. Returns <see langword="false"/> rather than
-    /// throwing for malformed or truncated input.
-    /// </summary>
     public static bool DecompressMc(Span<byte> dst, ReadOnlySpan<byte> src, Span<byte> workBuffer)
         => DecompressMc(dst, src, workBuffer, out _);
 
-    /// <inheritdoc cref="DecompressMc(Span{byte}, ReadOnlySpan{byte}, Span{byte})"/>
     public static bool DecompressMc(Span<byte> dst, ReadOnlySpan<byte> src, Span<byte> workBuffer, out McStatus status)
     {
         if (src.Length < 0xc)
@@ -186,8 +165,6 @@ public static unsafe class MeshCodec
             byte* output = dst;
             do
             {
-                // zstd asks for a fixed number of bytes at a time; on a truncated file that would
-                // walk off the end of src.
                 if (size > remaining)
                     return McStatus.TruncatedStream;
 
@@ -206,8 +183,6 @@ public static unsafe class MeshCodec
             ZSTD_freeDCtx(dctx);
         }
 
-        // Everything below is driven by fields inside the payload we just decompressed and by the
-        // trailing FMSH header. None of it is trusted: every offset is checked against dst and src.
         if (decompressedSize <= 0xee || ((dst[0xee] >> 3) & 1) == 0)
             return McStatus.Ok;
 
@@ -252,14 +227,9 @@ public static unsafe class MeshCodec
         return status;
     }
 
-    /// <summary>
-    /// Decodes a bare FMSH mesh section into <paramref name="dst"/>. Returns 0 on success and a
-    /// non-zero status for malformed input; it does not throw.
-    /// </summary>
     public static uint DecompressFmsh(Span<byte> dst, ReadOnlySpan<byte> src, Span<byte> workBuffer)
         => DecompressFmsh(dst, src, workBuffer, out _);
 
-    /// <inheritdoc cref="DecompressFmsh(Span{byte}, ReadOnlySpan{byte}, Span{byte})"/>
     public static uint DecompressFmsh(Span<byte> dst, ReadOnlySpan<byte> src, Span<byte> workBuffer, out McStatus status)
     {
         try
@@ -306,11 +276,7 @@ public static unsafe class MeshCodec
             Size = header->IndexOutputSize,
             Alignment = header->IndexAlign,
         };
-        // Retail rounds the absolute address here. That only agrees with the relative arithmetic the
-        // rest of the format uses - GetTotalDecompressedSize, TryGetMeshLayout - when dst itself is
-        // aligned to VertexAlign, which the game guarantees and a managed array does not beyond 8.
-        // Aligning the offset instead is identical whenever dst is aligned, and stops the decoded
-        // layout depending on where the caller's buffer happens to sit in memory.
+
         StreamContext vertexContext = new StreamContext
         {
             Stream = dst + AlignUp(indexContext.Size, header->VertexAlign),
@@ -318,7 +284,6 @@ public static unsafe class MeshCodec
             Alignment = header->VertexAlign,
         };
 
-        // The stream placement above comes straight from the file; both have to land inside dst.
         if (!Fits(dst, dstSize, indexContext.Stream, indexContext.Size) ||
             !Fits(dst, dstSize, vertexContext.Stream, vertexContext.Size))
         {
@@ -358,7 +323,6 @@ public static unsafe class MeshCodec
                         return 0;
                     }
 
-                    // Each frame declares its own length, which has to stay inside src.
                     if ((nuint)blockSize > srcSize - offset)
                     {
                         status = McStatus.TruncatedStream;
@@ -382,14 +346,8 @@ public static unsafe class MeshCodec
         }
     }
 
-    /// <summary>
-    /// Decodes a terrain chunk, allocating the output and scratch buffers from sizes declared in the
-    /// file. Returns <see langword="null"/> on failure; use the <see cref="McStatus"/> overload to
-    /// find out why.
-    /// </summary>
     public static byte[]? DecompressChunk(ReadOnlySpan<byte> src) => DecompressChunk(src, out _);
 
-    /// <inheritdoc cref="DecompressChunk(ReadOnlySpan{byte})"/>
     public static byte[]? DecompressChunk(ReadOnlySpan<byte> src, out McStatus status)
     {
         if (!TryReadChunkHeader(src, out ResChunkHeader header))
@@ -409,14 +367,9 @@ public static unsafe class MeshCodec
         return DecompressChunk(dst, src, work, out status) ? dst : null;
     }
 
-    /// <summary>
-    /// Decodes a terrain chunk into <paramref name="dst"/>. Returns <see langword="false"/> rather
-    /// than throwing for malformed or truncated input.
-    /// </summary>
     public static bool DecompressChunk(Span<byte> dst, ReadOnlySpan<byte> src, Span<byte> workBuffer)
         => DecompressChunk(dst, src, workBuffer, out _);
 
-    /// <inheritdoc cref="DecompressChunk(Span{byte}, ReadOnlySpan{byte}, Span{byte})"/>
     public static bool DecompressChunk(Span<byte> dst, ReadOnlySpan<byte> src, Span<byte> workBuffer, out McStatus status)
     {
         if (src.Length < 0x1c)
@@ -507,7 +460,6 @@ public static unsafe class MeshCodec
     public static bool DecompressQuad(Span<byte> dst, ReadOnlySpan<byte> src, Span<byte> workBuffer)
         => DecompressQuad(dst, src, workBuffer, out _);
 
-    /// <inheritdoc cref="DecompressQuad(Span{byte}, ReadOnlySpan{byte}, Span{byte})"/>
     public static bool DecompressQuad(Span<byte> dst, ReadOnlySpan<byte> src, Span<byte> workBuffer, out McStatus status)
     {
         if (src.Length < 4)
@@ -552,7 +504,6 @@ public static unsafe class MeshCodec
 
     public static byte[]? DecompressQuad(ReadOnlySpan<byte> src) => DecompressQuad(src, out _);
 
-    /// <inheritdoc cref="DecompressQuad(ReadOnlySpan{byte})"/>
     public static byte[]? DecompressQuad(ReadOnlySpan<byte> src, out McStatus status)
     {
         if (src.Length < 4)
@@ -583,12 +534,6 @@ public static unsafe class MeshCodec
         }
     }
 
-    /// <summary>
-    /// Works out where the index and vertex streams land inside a decoded package, given the
-    /// decoded bytes and the mesh section they were expanded from. This is the inverse of the
-    /// placement the decoder does, so it is how you read the streams back out in order to edit or
-    /// re-encode them.
-    /// </summary>
     public static bool TryGetMeshLayout(ReadOnlySpan<byte> decodedBfres, ReadOnlySpan<byte> fmshSection,
                                         out MeshLayout layout)
     {
@@ -619,10 +564,6 @@ public static unsafe class MeshCodec
         return true;
     }
 
-    /// <summary>
-    /// A stream alignment read out of a file header is a single byte and is used as a mask: zero
-    /// would produce a null base pointer and a non-power-of-two a bogus one.
-    /// </summary>
     internal static bool IsUsableAlignment(uint align)
         => align != 0 && align <= 0x1000 && (align & (align - 1)) == 0;
 

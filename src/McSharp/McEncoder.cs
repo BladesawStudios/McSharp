@@ -184,10 +184,6 @@ public static unsafe class McEncoder
         return -1;
     }
 
-    /// <summary>
-    /// Whether a run of bytes starting with the FMSH magic is structurally a mesh-section header
-    /// rather than a coincidence in compressed data.
-    /// </summary>
     public static bool IsPlausibleFmshHeader(ReadOnlySpan<byte> candidate, int trailingBytes)
     {
         if (candidate.Length < Marshal.SizeOf<ResMeshCodecHeader>())
@@ -207,7 +203,6 @@ public static unsafe class McEncoder
         if (header.IndexOutputSize == 0 && header.VertexOutputSize == 0)
             return false;
 
-        // The first frame is described by the header and has to fit in what follows it.
         nuint frame = MeshCodec.GetFrameSize(header.CompHeader);
 
         return frame != 0 && frame <= (nuint)(ulong)Math.Max(trailingBytes, 0);

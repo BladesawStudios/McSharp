@@ -57,8 +57,6 @@ internal sealed unsafe class ZStdCodec : ICodec
 
     public void Initialize(in StreamContext indexStream, in StreamContext vertexStream, uint param, StackAllocator allocator)
     {
-        // Retail skips the whole setup, and the workspace allocation with it, when there is no
-        // vertex stream; allocating anyway would overrun a WorkMemSize budgeted the retail way.
         if (vertexStream.Size == 0)
             return;
 
@@ -89,9 +87,6 @@ internal sealed unsafe class ZStdCodec : ICodec
         byte* basePos = ctx.CurrentPos;
         while (sizeRead < 0x25800)
         {
-            // Retail recomputes this from the frame base every iteration. Advancing the pointer
-            // incrementally instead adds the running total to a pointer the varint parse below has
-            // already moved, which drifts by one varint per block.
             byte* currentPos = basePos + sizeRead;
 
             nuint outSize;

@@ -7,10 +7,6 @@ using static ZstdSharp.Unsafe.Methods;
 
 namespace McSharp;
 
-/// <summary>
-/// Where the index and vertex streams sit inside a decoded package, once the mesh section has been
-/// expanded into it.
-/// </summary>
 public readonly struct MeshLayout
 {
     internal MeshLayout(uint indexOffset, uint indexSize, uint vertexOffset, uint vertexSize,
@@ -31,43 +27,17 @@ public readonly struct MeshLayout
     public byte IndexAlign { get; }
     public byte VertexAlign { get; }
 
-    /// <summary>First byte past the vertex stream, which is the package's decompressed size.</summary>
     public uint End => VertexOffset + VertexSize;
 }
 
-/// <summary>
-/// Writes FMSH mesh sections.
-/// </summary>
-/// <remarks>
-/// <para>
-/// Nintendo's own encoder uses codec type 2, whose entropy coding McSharp can read but not write.
-/// This encoder emits codec type 0 instead: the vertex and index streams are stored verbatim and
-/// the runtime copies them straight out. The container carries the codec type per section, and the
-/// retail loader dispatches on it without restriction, so a type 0 section is a legal mesh section
-/// and this is how you author new geometry rather than copying an existing section through.
-/// </para>
-/// <para>
-/// The trade is size: nothing is compressed, so a type 0 section is as large as the raw GPU
-/// buffers. The surrounding package is still zstd compressed as usual.
-/// </para>
-/// </remarks>
 public static unsafe class FmshEncoder
 {
-    /// <summary>
-    /// Bytes a codec type 0 frame carries. The runtime copies <c>min(remaining, 0x40000)</c> per
-    /// frame, so every frame but the last in a stream is exactly this long.
-    /// </summary>
     public const int FramePayloadSize = 0x40000;
 
     private const uint Version = 1;
 
     private static readonly int HeaderSize = Marshal.SizeOf<ResMeshCodecHeader>();
 
-    /// <summary>
-    /// Builds a mesh section holding <paramref name="indexStream"/> and
-    /// <paramref name="vertexStream"/> verbatim. Pass the result to
-    /// <see cref="McEncoder.CompressMcWithFmsh"/> to get a package.
-    /// </summary>
     public static byte[] EncodeUncompressed(ReadOnlySpan<byte> indexStream, ReadOnlySpan<byte> vertexStream,
                                             byte indexAlign = 8, byte vertexAlign = 8)
     {
@@ -91,13 +61,10 @@ public static unsafe class FmshEncoder
 
         for (int i = 0; i < frames.Length; ++i)
         {
-            // Every frame opens with the next frame's two stream sizes, least significant group
-            // first. A pair of zeroes ends the section.
             uint next = i + 1 < frames.Length ? (uint)frames[i + 1] : 0;
             pos += VByte.EncodeReversed(next, span.Slice(pos));
             pos += VByte.EncodeReversed(0, span.Slice(pos));
 
-            // The index stream drains first, then the vertex stream, matching the runtime codec.
             ReadOnlySpan<byte> source;
             int take;
 
@@ -124,38 +91,21 @@ public static unsafe class FmshEncoder
         return section;
     }
 
-    /// <summary>
-    /// Bytes a codec type 1 block expands to. The runtime decodes <c>min(remaining, 0x20000)</c>
-    /// per block.
-    /// </summary>
     public const int BlockPayloadSize = 0x20000;
 
-    /// <summary>
-    /// Input bytes a codec type 1 frame carries before the runtime closes it and starts the next.
-    /// </summary>
     public const int FrameInputLimit = 0x25800;
 
-    /// <summary>
-    /// Builds a mesh section holding <paramref name="indexStream"/> and
-    /// <paramref name="vertexStream"/> as zstd blocks (codec type 1). Same geometry as
-    /// <see cref="EncodeUncompressed"/> at a fraction of the size, in exchange for a real scratch
-    /// buffer where a type 0 section needs almost none.
-    /// </summary>
     public static byte[] EncodeZstd(ReadOnlySpan<byte> indexStream, ReadOnlySpan<byte> vertexStream,
                                     byte indexAlign = 8, byte vertexAlign = 8, int level = 8)
     {
         Validate(indexStream, vertexStream, indexAlign, vertexAlign);
 
-        // The runtime skips codec setup entirely when the vertex stream is empty, leaving nothing
-        // that can decode the blocks, so a type 1 section has to carry one.
         if (vertexStream.IsEmpty)
             throw new ArgumentException(
                 "Codec type 1 cannot represent a mesh section with an empty vertex stream, because " +
                 "the runtime leaves the codec uninitialised in that case. Use EncodeUncompressed.",
                 nameof(vertexStream));
 
-        // The runtime decodes every block through one context, so matches reach back across block
-        // and stream boundaries. Compress from one contiguous buffer to match.
         byte[] source = new byte[indexStream.Length + vertexStream.Length];
         indexStream.CopyTo(source);
         vertexStream.CopyTo(source.AsSpan(indexStream.Length));
@@ -182,9 +132,6 @@ public static unsafe class FmshEncoder
             int w = VByte.EncodeReversed(next, frame);
             w += VByte.EncodeReversed(0, frame.Slice(w));
 
-            // One bit per block says whether it was stored rather than compressed. The runtime
-            // reads these backwards from the end of the frame, and takes one extra past the last
-            // block before it stops.
             BitStreamWriter bits = default;
 
             foreach (Block block in frames[i])
@@ -217,7 +164,6 @@ public static unsafe class FmshEncoder
         public byte[] Payload = Array.Empty<byte>();
         public bool Stored;
 
-        /// <summary>Input bytes the runtime charges against the frame limit for this block.</summary>
         public int Cost => Payload.Length + (Stored ? 0 : VByte.ForwardLength((uint)Payload.Length));
     }
 
@@ -266,9 +212,6 @@ public static unsafe class FmshEncoder
 
                     Block block = new Block();
 
-                    // Zero means zstd judged the block incompressible and wrote nothing. That is the
-                    // only case we may store raw: discarding a block it did produce would leave the
-                    // decoder a block behind on entropy tables.
                     if (written == 0)
                     {
                         block.Stored = true;
@@ -292,10 +235,6 @@ public static unsafe class FmshEncoder
         return blocks;
     }
 
-    /// <summary>
-    /// Splits blocks the way the runtime does: it keeps pulling blocks out of one frame until the
-    /// input it has read reaches <see cref="FrameInputLimit"/>, and then the frame is done.
-    /// </summary>
     private static List<List<Block>> GroupIntoFrames(List<Block> blocks)
     {
         List<List<Block>> frames = new List<List<Block>>();
@@ -333,8 +272,6 @@ public static unsafe class FmshEncoder
             foreach (Block block in frames[i])
                 data += block.Cost;
 
-            // The bit stream sits at the end of the frame and the reader primes itself eight bytes
-            // below that end, so a frame is never shorter than eight bytes.
             int size = data + BitStreamWriter.ByteLength(frames[i].Count + 1);
             sizes[i] = Math.Max(size, 8);
             next = sizes[i];
@@ -343,10 +280,6 @@ public static unsafe class FmshEncoder
         return sizes;
     }
 
-    /// <summary>
-    /// Scratch a type 1 section needs: the allocator header, the codec object and a static zstd
-    /// decompression context.
-    /// </summary>
     public static uint WorkMemSizeForZstd
     {
         get
@@ -372,10 +305,6 @@ public static unsafe class FmshEncoder
                 nameof(indexStream));
     }
 
-    /// <summary>
-    /// Frame sizes, in order. A frame is its two leading sizes plus its payload, and each frame has
-    /// to declare the next one's length, so the list is costed from the back.
-    /// </summary>
     private static int[] PlanFrames(int indexSize, int vertexSize)
     {
         List<int> payloads = new List<int>();
@@ -410,7 +339,6 @@ public static unsafe class FmshEncoder
         header.IndexAlign = indexAlign;
         header.VertexAlign = vertexAlign;
 
-        // Codec type in the low two bits, no codec parameter above them.
         header.CompHeader.Flags = (ushort)codec;
         header.CompHeader.SizeInfo.StreamOffset.Set(firstFrameSize);
         header.CompHeader.SizeInfo.EndOffset.Set(0);
@@ -418,9 +346,5 @@ public static unsafe class FmshEncoder
         MemoryMarshal.Write(dst, in header);
     }
 
-    /// <summary>
-    /// Scratch the runtime needs for a type 0 section: the allocator header plus the codec object.
-    /// Rounded up, and tiny next to what type 2 asks for.
-    /// </summary>
     public const uint WorkMemSizeForUncompressed = 0x1000;
 }

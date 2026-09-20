@@ -25,18 +25,12 @@ internal static unsafe class VByte
         return result;
     }
 
-    /// <summary>
-    /// Decodes a varint and reports how many bytes it occupied, writing the value to
-    /// <paramref name="output"/>.
-    /// </summary>
     public static uint Decode(ref byte* data, ref uint output)
     {
         byte lead = *data++;
 
         if (lead < 0x80)
         {
-            // A single byte is one byte long and holds the whole value; returning the value here
-            // instead reported a zero length to every caller of a short varint.
             output = lead;
             return 1;
         }
@@ -59,9 +53,6 @@ internal static unsafe class VByte
         return size;
     }
 
-    /// <summary>
-    /// Number of bytes <see cref="EncodeReversed"/> will emit for <paramref name="value"/>.
-    /// </summary>
     public static int ReversedLength(uint value)
     {
         int n = 1;
@@ -73,10 +64,6 @@ internal static unsafe class VByte
         return n;
     }
 
-    /// <summary>
-    /// Inverse of <see cref="DecodeReversed"/>: seven bits per byte, least significant group first,
-    /// continuation bit set on every byte but the last.
-    /// </summary>
     public static int EncodeReversed(uint value, Span<byte> dst)
     {
         int n = 0;
@@ -89,7 +76,6 @@ internal static unsafe class VByte
         return n;
     }
 
-    /// <summary>Number of bytes <see cref="EncodeForward"/> will emit for <paramref name="value"/>.</summary>
     public static int ForwardLength(uint value)
     {
         int n = 1;
@@ -101,10 +87,6 @@ internal static unsafe class VByte
         return n;
     }
 
-    /// <summary>
-    /// Inverse of <see cref="Decode(ref byte*)"/>: seven bits per byte, most significant group
-    /// first, continuation bit set on every byte but the last.
-    /// </summary>
     public static int EncodeForward(uint value, Span<byte> dst)
     {
         int n = ForwardLength(value);
