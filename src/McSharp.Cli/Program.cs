@@ -3,6 +3,8 @@ using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
 using System.Linq;
+using System.Threading;
+using System.Threading.Tasks;
 using McSharp;
 
 namespace McSharp.Cli;
@@ -67,55 +69,39 @@ internal static class Program
         }
     }
 
-    private static byte[]? DecodeOne(string file, byte[] work, out McStatus status)
+    private static byte[]? DecodeOne(string file, out McStatus status)
     {
         byte[] data = File.ReadAllBytes(file);
 
-        if (Path.GetExtension(file) == ".chunk")
-        {
-            if (!MeshCodec.TryReadChunkHeader(data, out ResChunkHeader ch))
-            {
-                status = McStatus.NotAPackage;
-                return null;
-            }
-            byte[] outBuf = new byte[ch.DecompressedSize];
-            return MeshCodec.DecompressChunk(outBuf, data, work, out status) ? outBuf : null;
-        }
-
-        if (!MeshCodec.TryReadPackageHeader(data, out ResMeshCodecPackageHeader ph))
-        {
-            status = McStatus.NotAPackage;
-            return null;
-        }
-        byte[] dst = new byte[ph.GetDecompressedSize()];
-        return MeshCodec.DecompressMc(dst, data, work, out status) ? dst : null;
+        return Path.GetExtension(file) == ".chunk"
+            ? MeshCodec.DecompressChunk(data, out status)
+            : MeshCodec.DecompressMc(data, out status);
     }
 
     private static bool Decompress(string input, string outputDir)
     {
-        byte[] work = new byte[MeshCodec.DefaultWorkBufferSize];
         int ok = 0, failed = 0;
 
-        foreach (string file in EnumerateInputs(input))
+        Parallel.ForEach(EnumerateInputs(input), file =>
         {
             byte[]? result;
             McStatus status;
             try
             {
-                result = DecodeOne(file, work, out status);
+                result = DecodeOne(file, out status);
             }
             catch (Exception ex)
             {
                 Console.WriteLine($"[EXCEPTION] {Path.GetFileName(file)}: {ex.Message}");
-                failed++;
-                continue;
+                Interlocked.Increment(ref failed);
+                return;
             }
 
             if (result == null)
             {
                 Console.WriteLine($"[FAIL] {Path.GetFileName(file)}: {status}");
-                failed++;
-                continue;
+                Interlocked.Increment(ref failed);
+                return;
             }
 
             string rel = File.Exists(input)
@@ -125,8 +111,8 @@ internal static class Program
             Directory.CreateDirectory(Path.GetDirectoryName(outPath)!);
             File.WriteAllBytes(outPath, result);
             Console.WriteLine(Path.GetFileName(file));
-            ok++;
-        }
+            Interlocked.Increment(ref ok);
+        });
 
         Console.WriteLine($"\n{ok} decompressed, {failed} failed.");
         return failed == 0 && ok > 0;
@@ -155,11 +141,10 @@ internal static class Program
 
     private static int Verify(string input, string referenceDir)
     {
-        byte[] work = new byte[MeshCodec.DefaultWorkBufferSize];
         int match = 0, mismatch = 0, missing = 0, failed = 0;
         Stopwatch sw = Stopwatch.StartNew();
 
-        foreach (string file in EnumerateInputs(input))
+        Parallel.ForEach(EnumerateInputs(input), file =>
         {
             string stem = Path.GetFileNameWithoutExtension(file);
 
@@ -168,54 +153,52 @@ internal static class Program
                 : Path.Combine(referenceDir, Path.GetRelativePath(input, Path.GetDirectoryName(file)!), stem);
             if (!File.Exists(refPath))
             {
-                missing++;
-                continue;
+                Interlocked.Increment(ref missing);
+                return;
             }
 
             byte[]? result;
             McStatus status;
             try
             {
-                result = DecodeOne(file, work, out status);
+                result = DecodeOne(file, out status);
             }
             catch (Exception ex)
             {
                 Console.WriteLine($"[EXCEPTION] {stem}: {ex.GetType().Name}: {ex.Message}");
-                failed++;
-                continue;
+                Interlocked.Increment(ref failed);
+                return;
             }
 
             if (result == null)
             {
                 Console.WriteLine($"[FAIL] {stem}: {status}");
-                failed++;
-                continue;
+                Interlocked.Increment(ref failed);
+                return;
             }
 
             byte[] expected = File.ReadAllBytes(refPath);
             if (expected.Length != result.Length)
             {
                 Console.WriteLine($"[SIZE] {stem}: got {result.Length}, expected {expected.Length}");
-                mismatch++;
-                continue;
+                Interlocked.Increment(ref mismatch);
+                return;
             }
 
-            int diff = -1;
-            for (int i = 0; i < expected.Length; ++i)
-            {
-                if (expected[i] != result[i]) { diff = i; break; }
-            }
+            int diff = expected.AsSpan().CommonPrefixLength(result);
+            if (diff == expected.Length)
+                diff = -1;
 
             if (diff >= 0)
             {
                 Console.WriteLine($"[DIFF] {stem}: first difference at 0x{diff:x} (got 0x{result[diff]:x2}, expected 0x{expected[diff]:x2})");
-                mismatch++;
+                Interlocked.Increment(ref mismatch);
             }
             else
             {
-                match++;
+                Interlocked.Increment(ref match);
             }
-        }
+        });
 
         sw.Stop();
         Console.WriteLine();

@@ -1,4 +1,5 @@
 using System;
+using System.Buffers;
 using System.Runtime.InteropServices;
 using McSharp.Internal;
 using ZstdSharp.Unsafe;
@@ -100,8 +101,15 @@ public static unsafe class MeshCodec
         }
 
         byte[] dst = new byte[decompressedSize];
-        byte[] work = new byte[workSize];
-        return DecompressMc(dst, src, work, out status) ? dst : null;
+        byte[] work = ArrayPool<byte>.Shared.Rent((int)workSize);
+        try
+        {
+            return DecompressMc(dst, src, work, out status) ? dst : null;
+        }
+        finally
+        {
+            ArrayPool<byte>.Shared.Return(work);
+        }
     }
 
     public static bool DecompressMc(Span<byte> dst, ReadOnlySpan<byte> src, Span<byte> workBuffer)
@@ -148,40 +156,32 @@ public static unsafe class MeshCodec
         if (dstSize < decompressedSize)
             return McStatus.DestinationTooSmall;
 
-        ZSTD_DCtx_s* dctx = ZSTD_createDCtx();
+        ZSTD_DCtx_s* dctx = Zstd.PackageDCtx;
 
         if (dctx == null)
             return McStatus.CorruptStream;
 
-        byte* ptr;
-        try
+        ZSTD_DCtx_setParameter(dctx, ZSTD_dParameter.ZSTD_d_experimentalParam1, 1);
+        ZSTD_decompressBegin(dctx);
+        nuint size = 1;
+        nuint remaining = srcSize - 0xc;
+        nuint remainingOutput = decompressedSize;
+        byte* ptr = src + 0xc;
+        byte* output = dst;
+        do
         {
-            ZSTD_DCtx_setParameter(dctx, ZSTD_dParameter.ZSTD_d_experimentalParam1, 1);
-            ZSTD_decompressBegin(dctx);
-            nuint size = 1;
-            nuint remaining = srcSize - 0xc;
-            nuint remainingOutput = decompressedSize;
-            ptr = src + 0xc;
-            byte* output = dst;
-            do
-            {
-                if (size > remaining)
-                    return McStatus.TruncatedStream;
+            if (size > remaining)
+                return McStatus.TruncatedStream;
 
-                nuint result = ZSTD_decompressContinue(dctx, output, remainingOutput, ptr, size);
-                if (ZSTD_isError(result))
-                    return McStatus.CorruptStream;
-                ptr += size;
-                remaining -= size;
-                size = ZSTD_nextSrcSizeToDecompress(dctx);
-                output += result;
-                remainingOutput -= result;
-            } while (size != 0);
-        }
-        finally
-        {
-            ZSTD_freeDCtx(dctx);
-        }
+            nuint result = ZSTD_decompressContinue(dctx, output, remainingOutput, ptr, size);
+            if (ZSTD_isError(result))
+                return McStatus.CorruptStream;
+            ptr += size;
+            remaining -= size;
+            size = ZSTD_nextSrcSizeToDecompress(dctx);
+            output += result;
+            remainingOutput -= result;
+        } while (size != 0);
 
         if (decompressedSize <= 0xee || ((dst[0xee] >> 3) & 1) == 0)
             return McStatus.Ok;
@@ -363,8 +363,15 @@ public static unsafe class MeshCodec
         }
 
         byte[] dst = new byte[header.DecompressedSize];
-        byte[] work = new byte[header.WorkMemSize];
-        return DecompressChunk(dst, src, work, out status) ? dst : null;
+        byte[] work = ArrayPool<byte>.Shared.Rent((int)header.WorkMemSize);
+        try
+        {
+            return DecompressChunk(dst, src, work, out status) ? dst : null;
+        }
+        finally
+        {
+            ArrayPool<byte>.Shared.Return(work);
+        }
     }
 
     public static bool DecompressChunk(Span<byte> dst, ReadOnlySpan<byte> src, Span<byte> workBuffer)

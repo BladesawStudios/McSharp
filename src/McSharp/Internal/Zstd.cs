@@ -8,6 +8,32 @@ internal static unsafe class Zstd
 {
     private static ReadOnlySpan<uint> RepStartValue => new uint[] { 1, 4, 8 };
 
+    private sealed class DCtxHolder
+    {
+        public readonly ZSTD_DCtx_s* Ctx;
+
+        public DCtxHolder(ZSTD_DCtx_s* ctx) => Ctx = ctx;
+
+        ~DCtxHolder() => ZSTD_freeDCtx(Ctx);
+    }
+
+    [ThreadStatic]
+    private static DCtxHolder? t_packageDCtx;
+
+    public static ZSTD_DCtx_s* PackageDCtx
+    {
+        get
+        {
+            if (t_packageDCtx != null)
+                return t_packageDCtx.Ctx;
+
+            ZSTD_DCtx_s* dctx = ZSTD_createDCtx();
+            if (dctx != null)
+                t_packageDCtx = new DCtxHolder(dctx);
+            return dctx;
+        }
+    }
+
     public static nuint DCtxWorkspaceSize => ZSTD_estimateDCtxSize() + 0x4d8;
 
     public static ZSTD_DCtx_s* SetupDCtx(void* wksp, nuint wkspSize)
